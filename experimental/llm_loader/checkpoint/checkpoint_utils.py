@@ -77,6 +77,50 @@ def _promote_llm_subconfig(config: Any, root: Dict[str,
     if root.get("num_attention_heads") is not None:
         return root
 
+    # OpenFly/OpenVLA stores the real LLM architecture in the referenced base
+    # Llama checkpoint (hf_llm_id), while the wrapper config only keeps the
+    # multimodal metadata. Reconstruct the decoder config from the base LLM so
+    # the generic CausalLM export path can still work.
+    if root.get("model_type") == "openvla":
+        hf_llm_id = root.get("hf_llm_id")
+        if hf_llm_id:
+            try:
+                from transformers import AutoConfig
+                base = AutoConfig.from_pretrained(
+                    hf_llm_id, trust_remote_code=True).to_dict()
+
+                # OpenVLA stores the decoder architecture in nested text_config,
+                # while the outer wrapper only keeps multimodal metadata.
+                text_base = _nested_config_to_dict(base.get("text_config"))
+                candidate = text_base if (
+                    text_base.get("hidden_size") is not None
+                    and text_base.get("num_attention_heads") is not None
+                ) else base
+
+                # Preserve any wrapper-level overrides that matter for export.
+                if root.get("llm_max_length") is not None:
+                    candidate["max_position_embeddings"] = root[
+                        "llm_max_length"]
+                if root.get("pad_token_id") is not None:
+                    candidate["pad_token_id"] = root["pad_token_id"]
+                text_cfg = root.get("text_config")
+                if isinstance(text_cfg, dict):
+                    for key, value in text_cfg.items():
+                        if value is not None:
+                            candidate[key] = value
+                # Patch any missing values from the outer config so exporters
+                # still see the multimodal metadata when needed.
+                for key, value in base.items():
+                    if key not in candidate and value is not None:
+                        candidate[key] = value
+                return candidate
+            except (OSError, ValueError, ImportError) as exc:
+                logger.warning(
+                    "Failed to reconstruct openvla base LLM config from %s (%s); falling back to nested fields.",
+                    hf_llm_id,
+                    exc,
+                )
+
     for name in ("llm_config", "text_config", "language_config"):
         sub = getattr(config, name, None)
         if sub is None and name in root:

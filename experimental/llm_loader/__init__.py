@@ -38,6 +38,7 @@ from .config import ModelConfig, QuantConfig
 from .model import AutoModel, register_model
 # Register model-type-specific implementations
 from .models.nemotron_h.modeling_nemotron_h import NemotronHCausalLM
+from .models.default.modeling_default import CausalLM
 from .models.qwen3_5.modeling_qwen3_5_text import Qwen3_5CausalLM
 from .models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeCausalLM
 from .onnx.export import export_onnx
@@ -46,6 +47,7 @@ register_model("nemotron_h", NemotronHCausalLM)
 register_model("qwen3_5_text", Qwen3_5CausalLM)
 register_model("qwen3_moe", Qwen3MoeCausalLM)
 register_model("NemotronH_Nano_VL_V2", NemotronHCausalLM)
+register_model("openvla", CausalLM)
 
 __all__ = [
     "__version__",

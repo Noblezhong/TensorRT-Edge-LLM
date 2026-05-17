@@ -32,6 +32,7 @@ Usage::
 Supported model types
 ----------------------
 VLMs (LLM + visual encoder):
+    openvla                       (OpenFly / OpenVLA-style fused dual-vision VLM)
     qwen3_vl, qwen3_omni          (Qwen3-VL / Qwen3-Omni)
     qwen3_5                       (Qwen3.5)
     qwen2_5_vl                    (Qwen2.5-VL)
@@ -71,6 +72,7 @@ logger = logging.getLogger("llm_loader.export_all_cli")
 # ---------------------------------------------------------------------------
 
 _VLM_MODEL_TYPES = frozenset([
+    "openvla",
     "qwen3_vl",
     "qwen3_omni",
     "qwen3_5",
@@ -219,6 +221,14 @@ def _dtype_from_str(s: str) -> "torch.dtype":
     return mapping[s]
 
 
+def _openvla_llm_key_remap(key: str) -> "str | None":
+    """Map OpenFly wrapper weights onto the generic CausalLM key layout."""
+    prefix = "language_model."
+    if not key.startswith(prefix):
+        return None
+    return key.removeprefix(prefix)
+
+
 # ---------------------------------------------------------------------------
 # Export stages
 # ---------------------------------------------------------------------------
@@ -236,9 +246,11 @@ def _export_llm(model_dir: str,
     logger.info("[LLM] Loading checkpoint from %s", model_dir)
     try:
         from .model import AutoModel
+        key_remap = _openvla_llm_key_remap if model_type == "openvla" else None
         model = AutoModel.from_pretrained(
             model_dir,
             device="cpu",
+            key_remap=key_remap,
             eagle_base=eagle_base,
         )
     except (OSError, ValueError, RuntimeError, ImportError) as exc:
@@ -330,6 +342,32 @@ def _export_visual(model_dir: str, visual_out_dir: str, weights: dict,
         "model_type": top_level_model_type,
         "vision_config": vis_cfg,
     }
+    if model_type == "openvla":
+        text_cfg = dict(config.get("text_config", {}) or {})
+        if "hidden_size" not in text_cfg and config.get("hf_llm_id"):
+            try:
+                from transformers import AutoConfig
+                base_cfg = AutoConfig.from_pretrained(
+                    config["hf_llm_id"], trust_remote_code=True).to_dict()
+                base_text_cfg = dict(base_cfg.get("text_config")
+                                     or base_cfg or {})
+                text_cfg = {**base_text_cfg, **text_cfg}
+            except (OSError, ValueError, ImportError) as exc:
+                logger.warning(
+                    "[Visual] Failed to resolve base LLM config for openvla from %s (%s)",
+                    config.get("hf_llm_id"),
+                    exc,
+                )
+        if config.get("llm_max_length") is not None:
+            text_cfg["max_position_embeddings"] = config["llm_max_length"]
+        if config.get("pad_token_id") is not None:
+            text_cfg["pad_token_id"] = config["pad_token_id"]
+        if text_cfg:
+            vis_cfg_out["text_config"] = text_cfg
+        if config.get("hf_llm_id") is not None:
+            vis_cfg_out["hf_llm_id"] = config["hf_llm_id"]
+        if config.get("llm_backbone_id") is not None:
+            vis_cfg_out["llm_backbone_id"] = config["llm_backbone_id"]
     if model_type in ("qwen2_5_vl", "qwen3_vl", "qwen3_omni", "qwen3_5"):
         # C++ QwenViTRunner reads these token IDs and rope_theta from config.json.
         # For Qwen3-VL the token IDs are at the root level, but vocab_size and

@@ -23,6 +23,7 @@ Visual encoders — I/O spec via ``model.get_onnx_export_args(config, device)``:
     - Qwen3-VL         (model_type ``qwen3_vl``, ``qwen3_omni``)
     - Qwen3.5          (model_type ``qwen3_5``)
     - Qwen2.5-VL       (model_type ``qwen2_5_vl``)
+    - OpenVLA / OpenFly (model_type ``openvla``)
     - InternVL3        (model_type ``internvl_chat``)
     - InternVL3 HF     (model_type ``internvl``)
     - Phi-4 Multimodal (model_type ``phi4mm``, ``phi4_multimodal``)
@@ -62,6 +63,7 @@ __all__ = [
 
 # Maps model_type → internal family name
 _VISUAL_REGISTRY: dict[str, str] = {
+    "openvla": "openvla",
     "qwen3_vl": "qwen3_vl",
     "qwen3_omni": "qwen3_vl",
     "qwen3_5": "qwen3_5",
@@ -75,6 +77,8 @@ _VISUAL_REGISTRY: dict[str, str] = {
 
 # Maps family → dotted module path inside llm_loader
 _VISUAL_FAMILY_MODULE: dict[str, str] = {
+    "openvla":
+    "llm_loader.models.openvla.modeling_openvla_visual",
     "qwen3_vl":
     "llm_loader.models.qwen3_vl.modeling_qwen3_vl_visual",
     "qwen3_5":
@@ -93,6 +97,7 @@ _VISUAL_FAMILY_MODULE: dict[str, str] = {
 
 # Maps family → build function name in that module
 _VISUAL_FAMILY_BUILD_FN: dict[str, str] = {
+    "openvla": "build_openvla_visual",
     "qwen3_vl": "build_qwen3_vl_visual",
     "qwen3_5": "build_qwen3_5_visual",
     "qwen2_5_vl": "build_qwen25_vl_visual",
@@ -130,6 +135,9 @@ _AUDIO_KEY_PREFIX: dict[str, str] = {
 
 def _get_visual_config(model_type: str, config: dict) -> dict:
     """Extract visual encoder sub-config from the full model config."""
+    if model_type == "openvla":
+        # OpenVLA keeps its visual + text fields at the root config.
+        return config
     if model_type in ("qwen3_vl", "qwen3_omni", "qwen3_5", "qwen2_5_vl"):
         # Qwen3-Omni stores vision_config nested under thinker_config; other
         # Qwen VL variants keep it at the root.
