@@ -137,8 +137,23 @@ std::string decodeHFTokenToNormal(std::string const& hfToken)
     {
         auto const utf8 = unicodeCptToUtf8(cpt);
         auto it = map.find(utf8);
-        assert(it != map.end());
-        decoded += it->second;
+        if (it != map.end())
+        {
+            decoded += static_cast<char>(it->second);
+            continue;
+        }
+
+        // SentencePiece-style tokenizers commonly use U+2581 "▁" to represent a leading space.
+        // Treat it as a plain ASCII space so BPE vocab entries like "▁the" remain usable.
+        if (cpt == 0x2581)
+        {
+            decoded.push_back(' ');
+            continue;
+        }
+
+        // Fall back to preserving the original UTF-8 piece rather than aborting on
+        // tokenizer variants that contain raw Unicode tokens outside the byte map.
+        decoded += utf8;
     }
 
     return decoded;

@@ -54,6 +54,21 @@ std::tuple<std::string, std::string> keySystemPromptWithLoraWeights(
     return std::make_tuple(systemPrompt, loraWeightsName);
 }
 
+std::vector<int32_t> getRequestInputIds(
+    rt::LLMGenerationRequest const& request, int32_t batchIdx, tokenizer::Tokenizer const* tokenizer)
+{
+    if (batchIdx < static_cast<int32_t>(request.requests.size()))
+    {
+        auto const& requestItem = request.requests[batchIdx];
+        if (!requestItem.inputIds.empty())
+        {
+            return requestItem.inputIds;
+        }
+    }
+
+    return tokenizer->encode(request.formattedRequests[batchIdx].formattedCompleteRequest, false);
+}
+
 } // namespace
 
 namespace rt
@@ -522,8 +537,7 @@ bool LLMInferenceSpecDecodeRuntime::handleRequest(
         for (int32_t i = 0; i < activeBatchSize; ++i)
         {
             context.systemPrompts[i] = request.formattedRequests[i].formattedSystemPrompt;
-            context.rawBatchedInputIds.emplace_back(
-                mTokenizer->encode(request.formattedRequests[i].formattedCompleteRequest, false));
+            context.rawBatchedInputIds.emplace_back(getRequestInputIds(request, i, mTokenizer.get()));
             if (context.rawBatchedInputIds[i].empty())
             {
                 LOG_ERROR("Failed to tokenize input text for request %d in batch", i);
@@ -931,7 +945,7 @@ bool LLMInferenceSpecDecodeRuntime::multiModalRuntimePreprocess(
     {
         for (int32_t i = 0; i < activeBatchSize; ++i)
         {
-            batchedInputIds.push_back(mTokenizer->encode(request.formattedRequests[i].formattedCompleteRequest, false));
+            batchedInputIds.push_back(getRequestInputIds(request, i, mTokenizer.get()));
             if (batchedInputIds.back().empty())
             {
                 LOG_ERROR("Failed to tokenize input text for request %d in batch", i);

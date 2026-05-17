@@ -18,6 +18,7 @@
 #include "tokenEncoder.h"
 #include "common/inputLimits.h"
 #include "tokenizerUtils.h"
+#include <cstdio>
 #include <cassert>
 #include <limits>
 #include <stdexcept>
@@ -27,16 +28,26 @@ namespace trt_edgellm
 namespace tokenizer
 {
 
+namespace
+{
+std::string mergeKey(std::string const& left, std::string const& right)
+{
+    return left + "\x1f" + right;
+}
+} // namespace
+
 // Size limits for token encoder processing
 constexpr size_t LARGE_PIECE_WARNING_BYTES = 65536; // 64KB warning threshold
 
-TokenEncoder::TokenEncoder(Type type) noexcept
+TokenEncoder::TokenEncoder(Type type, bool byteFallback) noexcept
     : mType(type)
+    , mByteFallback(byteFallback)
     , mVocabSize(0)
 {
 }
 
-bool TokenEncoder::initialize(TokenToRanks const& vocab, TokenToRanks const& specialTokens)
+bool TokenEncoder::initialize(
+    TokenToRanks const& vocab, TokenToRanks const& specialTokens, TokenToRanks const& mergeRanks)
 {
     if (vocab.empty())
     {
@@ -45,6 +56,7 @@ bool TokenEncoder::initialize(TokenToRanks const& vocab, TokenToRanks const& spe
 
     mEncoder = vocab;
     mSpecialTokensEncoder = specialTokens;
+    mMergeRanks = mergeRanks;
 
     // Build reverse mappings using utility function
     mDecoder = reverseEncoder(mEncoder);
@@ -77,7 +89,16 @@ bool TokenEncoder::encode(std::string const& piece, std::vector<Rank>& output) c
     {
         switch (mType)
         {
-        case BPE: bytePairEncode(piece, output); break;
+        case BPE:
+            if (!bytePairEncode(piece, output))
+            {
+                if (mByteFallback && byteFallbackEncode(piece, output))
+                {
+                    return true;
+                }
+                return false;
+            }
+            break;
         default: LOG_ERROR("Unknown or unsupported encoder type: %s", getTypeString(mType).c_str()); return false;
         }
         return true;
@@ -166,11 +187,11 @@ std::string TokenEncoder::getRankToken(Rank rank) const
     return ""; // Rank not found
 }
 
-void TokenEncoder::bytePairEncode(std::string const& piece, std::vector<Rank>& output) const
+bool TokenEncoder::bytePairEncode(std::string const& piece, std::vector<Rank>& output) const
 {
     if (piece.empty())
     {
-        return;
+        return true;
     }
 
     // Check if the piece is already in vocabulary
@@ -178,94 +199,111 @@ void TokenEncoder::bytePairEncode(std::string const& piece, std::vector<Rank>& o
     if (it != mEncoder.end())
     {
         output.emplace_back(it->second);
-        return;
+        return true;
     }
 
-    // Initialize parts vector with (start_position, rank) pairs
-    std::vector<std::pair<int, Rank>> parts;
-    parts.reserve(piece.size() + 1);
-
-    auto const MAX_INT = std::numeric_limits<int>::max();
-    auto const MAX_RANK = std::numeric_limits<Rank>::max();
-    std::pair<int, Rank> minRank{MAX_INT, MAX_RANK};
-
-    // Initialize with bigram ranks
-    for (size_t i = 0; i < piece.size() - 1; ++i)
+    std::vector<std::string> symbols;
+    auto const cpts = unicodeCptsFromUtf8(piece);
+    symbols.reserve(cpts.size());
+    for (auto const cpt : cpts)
     {
-        Rank rank = MAX_RANK;
-        std::string bigram(piece.begin() + i, piece.begin() + i + 2);
-
-        auto bigramIt = mEncoder.find(bigram);
-        if (bigramIt != mEncoder.end())
-        {
-            rank = bigramIt->second;
-        }
-
-        if (rank < minRank.second)
-        {
-            minRank = std::make_pair(static_cast<int>(i), rank);
-        }
-
-        parts.emplace_back(static_cast<int>(i), rank);
+        symbols.emplace_back(unicodeCptToUtf8(cpt));
     }
 
-    // Add sentinel values
-    parts.emplace_back(static_cast<int>(piece.size() - 1), MAX_RANK);
-    parts.emplace_back(static_cast<int>(piece.size()), MAX_RANK);
-
-    // Helper function to get merged rank
-    auto getMergedRank = [&](size_t i) -> Rank {
-        if (i + 3 >= parts.size())
-        {
-            return MAX_RANK;
-        }
-
-        std::string merged(piece.begin() + parts[i].first, piece.begin() + parts[i + 3].first);
-        auto mergedIt = mEncoder.find(merged);
-        return (mergedIt != mEncoder.end()) ? mergedIt->second : MAX_RANK;
-    };
-
-    // Main BPE loop
-    while (minRank.second != MAX_RANK)
+    if (symbols.empty())
     {
-        size_t i = static_cast<size_t>(minRank.first);
+        return true;
+    }
 
-        // Update adjacent ranks
-        if (i > 0)
+    auto findBestMerge = [&]() -> std::pair<size_t, Rank> {
+        auto const MAX_RANK = std::numeric_limits<Rank>::max();
+        std::pair<size_t, Rank> best{std::numeric_limits<size_t>::max(), MAX_RANK};
+        for (size_t i = 0; i + 1 < symbols.size(); ++i)
         {
-            parts[i - 1].second = getMergedRank(i - 1);
-        }
-        parts[i].second = getMergedRank(i);
-
-        // Remove the merged part
-        parts.erase(parts.begin() + i + 1);
-
-        // Find new minimum rank
-        minRank = std::make_pair(MAX_INT, MAX_RANK);
-        for (size_t j = 0; j < parts.size() - 1; ++j)
-        {
-            if (parts[j].second < minRank.second)
+            auto itMerge = mMergeRanks.find(mergeKey(symbols[i], symbols[i + 1]));
+            if (itMerge != mMergeRanks.end() && itMerge->second < best.second)
             {
-                minRank = std::make_pair(static_cast<int>(j), parts[j].second);
+                best = {i, itMerge->second};
             }
         }
+        return best;
+    };
+
+    while (true)
+    {
+        auto best = findBestMerge();
+        if (best.second == std::numeric_limits<Rank>::max())
+        {
+            break;
+        }
+
+        size_t const idx = best.first;
+        symbols[idx] += symbols[idx + 1];
+        symbols.erase(symbols.begin() + static_cast<std::ptrdiff_t>(idx + 1));
     }
 
-    // Collect final tokens
-    for (size_t i = 0; i < parts.size() - 1; ++i)
+    for (auto const& token : symbols)
     {
-        std::string token(piece.begin() + parts[i].first, piece.begin() + parts[i + 1].first);
         auto tokenIt = mEncoder.find(token);
         if (tokenIt != mEncoder.end())
         {
             output.emplace_back(tokenIt->second);
+            continue;
         }
-        else
+
+        if (mByteFallback)
         {
-            LOG_ERROR("Token not found in encoder during bytePairEncode: '%s'", token.c_str());
-            return;
+            bool fallbackOk = true;
+            char tokenBuf[8];
+            for (unsigned char byte : token)
+            {
+                std::snprintf(tokenBuf, sizeof(tokenBuf), "<0x%02X>", static_cast<unsigned int>(byte));
+                auto byteIt = mEncoder.find(tokenBuf);
+                if (byteIt == mEncoder.end())
+                {
+                    fallbackOk = false;
+                    break;
+                }
+                output.emplace_back(byteIt->second);
+            }
+            if (fallbackOk)
+            {
+                continue;
+            }
         }
+
+        LOG_ERROR("Token not found in encoder during bytePairEncode: '%s'", token.c_str());
+        return false;
     }
+
+    return true;
+}
+
+bool TokenEncoder::byteFallbackEncode(std::string const& piece, std::vector<Rank>& output) const
+{
+    if (piece.empty())
+    {
+        return true;
+    }
+
+    std::vector<Rank> fallbackTokens;
+    fallbackTokens.reserve(piece.size());
+
+    char tokenBuf[8];
+    for (unsigned char byte : piece)
+    {
+        std::snprintf(tokenBuf, sizeof(tokenBuf), "<0x%02X>", static_cast<unsigned int>(byte));
+        auto it = mEncoder.find(tokenBuf);
+        if (it == mEncoder.end())
+        {
+            LOG_ERROR("Byte fallback token not found in encoder: '%s'", tokenBuf);
+            return false;
+        }
+        fallbackTokens.emplace_back(it->second);
+    }
+
+    output.insert(output.end(), fallbackTokens.begin(), fallbackTokens.end());
+    return true;
 }
 
 std::string TokenEncoder::getTypeString(Type type) const

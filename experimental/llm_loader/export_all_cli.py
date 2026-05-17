@@ -225,7 +225,7 @@ def _openvla_llm_key_remap(key: str) -> "str | None":
     """Map OpenFly wrapper weights onto the generic CausalLM key layout."""
     prefix = "language_model."
     if not key.startswith(prefix):
-        return None
+        return key
     return key.removeprefix(prefix)
 
 

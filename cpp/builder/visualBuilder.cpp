@@ -188,6 +188,27 @@ bool VisualBuilder::parseConfig()
         }
         break;
 
+    case multimodal::ModelType::OPENVLA:
+        // OpenVLA/OpenFly fused visual ONNX expects fixed [3, 6, H, W] input.
+        mNumChannels = 6;
+        if (mModelConfig.contains(kVisionConfigKey) && mModelConfig[kVisionConfigKey].contains("image_sizes"))
+        {
+            auto const& imageSizes = mModelConfig[kVisionConfigKey]["image_sizes"];
+            if (!imageSizes.empty())
+            {
+                int64_t const img = imageSizes[0].get<int64_t>();
+                mImageSizeH = img;
+                mImageSizeW = img;
+            }
+        }
+        if (mImageSizeH == 0 || mImageSizeW == 0)
+        {
+            mImageSizeH = 224;
+            mImageSizeW = 224;
+            LOG_WARNING("OpenVLA image_sizes missing in config; defaulting to 224x224");
+        }
+        break;
+
     case multimodal::ModelType::NEMOTRON_OMNI_VISION_ENCODER:
     {
         mNumChannels = 3;
@@ -234,6 +255,8 @@ bool VisualBuilder::setupVisualOptimizationProfile(
     case multimodal::ModelType::NEMOTRON_OMNI_VISION_ENCODER:
         result = setupNemotronOmniViTProfile(*visualProfile);
         break;
+
+    case multimodal::ModelType::OPENVLA: result = setupOpenVLAViTProfile(*visualProfile); break;
 
     default: LOG_ERROR("Unsupported model type for visual encoder: %d", static_cast<int>(mModelType)); return false;
     }
@@ -380,6 +403,14 @@ bool VisualBuilder::setupNemotronOmniViTProfile(nvinfer1::IOptimizationProfile& 
         LOG_ERROR("Failed to setup Nemotron-Omni ViT optimization profile");
     }
     return result;
+}
+
+bool VisualBuilder::setupOpenVLAViTProfile(nvinfer1::IOptimizationProfile& profile)
+{
+    // OpenVLA visual ONNX uses a fixed input: [3, 6, H, W].
+    return setOptimizationProfile(&profile, binding_names::kVisualInput,
+        createDims({3, mNumChannels, mImageSizeH, mImageSizeW}), createDims({3, mNumChannels, mImageSizeH, mImageSizeW}),
+        createDims({3, mNumChannels, mImageSizeH, mImageSizeW}));
 }
 
 bool VisualBuilder::copyConfig()

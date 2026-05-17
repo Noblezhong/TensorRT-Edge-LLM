@@ -40,6 +40,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
+from timm.models.vision_transformer import LayerScale
 
 __all__ = ["OpenVLAVisualModel", "build_openvla_visual"]
 
@@ -50,6 +51,16 @@ def unpack_tuple(fn: Callable[[Any], Tuple[Any]]) -> Callable[[Any], Any]:
         return result[0] if isinstance(result, tuple) else result
 
     return wrapper
+
+
+def _ls_new_forward(self, x: torch.Tensor) -> torch.Tensor:
+    return x.mul_(self.scale_factor) if self.inplace else x * self.scale_factor
+
+
+def ls_apply_patch(ls_module: LayerScale):
+    ls_module.scale_factor = nn.Parameter(ls_module.gamma.clone())
+    ls_module.forward = _ls_new_forward.__get__(ls_module, LayerScale)
+    del ls_module.gamma
 
 
 class PrismaticVisionBackbone(nn.Module):
@@ -80,6 +91,10 @@ class PrismaticVisionBackbone(nn.Module):
                     return_prefix_tokens=True))
         self.embed_dim = self.featurizer.embed_dim
 
+        for module in self.featurizer.modules():
+            if isinstance(module, LayerScale):
+                ls_apply_patch(module)
+
         if self.use_fused_vision_backbone:
             self.fused_featurizer = timm.create_model(
                 timm_model_ids[1],
@@ -92,6 +107,10 @@ class PrismaticVisionBackbone(nn.Module):
                         n={len(self.fused_featurizer.blocks) - 2},
                         return_prefix_tokens=True))
             self.embed_dim += self.fused_featurizer.embed_dim
+
+            for module in self.fused_featurizer.modules():
+                if isinstance(module, LayerScale):
+                    ls_apply_patch(module)
 
         # Keep the modules in eval mode by default; export only traces forward.
         self.featurizer.eval()

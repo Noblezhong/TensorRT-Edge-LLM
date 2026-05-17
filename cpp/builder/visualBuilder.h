@@ -151,6 +151,12 @@ private:
     //! @return true if setup was successful, false otherwise
     bool setupNemotronOmniViTProfile(nvinfer1::IOptimizationProfile& profile);
 
+    //! Set up optimization profile for OpenVLA/OpenFly ViT model.
+    //! Configures fixed input shape [3, 6, 224, 224] (or config-defined H/W) for fused 3-frame input.
+    //! @param profile Optimization profile to configure
+    //! @return true if setup was successful, false otherwise
+    bool setupOpenVLAViTProfile(nvinfer1::IOptimizationProfile& profile);
+
     //! Copy and save the model configuration with builder config.
     //! Creates a config.json file in the engine directory with both original model config
     //! and builder configuration parameters.

@@ -35,6 +35,7 @@ enum class ModelType
     QWEN3_OMNI_VISION_ENCODER,    //!< Qwen3-Omni vision encoder (image-to-embeddings)
     QWEN3_OMNI_CODE2WAV,          //!< Qwen3-Omni Code2Wav vocoder (codes-to-waveform)
     INTERNVL,                     //!< InternVL model
+    OPENVLA,                      //!< OpenVLA/OpenFly model
     PHI4MM,                       //!< Phi-4MM model
     NEMOTRON_OMNI_VISION_ENCODER, //!< Nemotron-Omni vision encoder
     NEMOTRON_OMNI_AUDIO_ENCODER,  //!< Nemotron-Omni audio encoder
@@ -63,6 +64,8 @@ inline ModelType stringToModelType(std::string const& modelTypeStr)
         return ModelType::QWEN3_OMNI_CODE2WAV;
     if (modelTypeStr == "internvl" || modelTypeStr == "internvl_vision")
         return ModelType::INTERNVL;
+    if (modelTypeStr == "openvla")
+        return ModelType::OPENVLA;
     if (modelTypeStr == "phi4mm")
         return ModelType::PHI4MM;
     if (modelTypeStr == "nemotron_omni_vision_encoder")

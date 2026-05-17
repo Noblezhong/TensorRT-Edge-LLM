@@ -53,17 +53,19 @@ public:
      * @brief Constructor for token encoder
      * @param type Encoder algorithm type (default: BPE)
      */
-    TokenEncoder(Type type = BPE) noexcept;
+    TokenEncoder(Type type = BPE, bool byteFallback = false) noexcept;
     ~TokenEncoder() noexcept = default;
 
     /**
      * @brief Initialize with vocabulary
      * @param vocab Main vocabulary mapping
      * @param specialTokens Special tokens mapping
+     * @param mergeRanks BPE merge ranks mapping (lower rank = higher priority)
      * @return true if vocab is non-empty and initialization completes;
      *         false if vocab is empty
      */
-    bool initialize(TokenToRanks const& vocab, TokenToRanks const& specialTokens = {});
+    bool initialize(TokenToRanks const& vocab, TokenToRanks const& specialTokens = {},
+        TokenToRanks const& mergeRanks = {});
 
     /**
      * @brief Encode a piece of text using the algorithm
@@ -127,17 +129,20 @@ private:
     /**
      * @brief Byte Pair Encoding implementation
      */
-    void bytePairEncode(std::string const& piece, std::vector<Rank>& output) const;
+    bool bytePairEncode(std::string const& piece, std::vector<Rank>& output) const;
+    bool byteFallbackEncode(std::string const& piece, std::vector<Rank>& output) const;
     /**
      * @brief Get string representation of encoder type
      */
     std::string getTypeString(Type type) const;
 
     Type mType;
+    bool mByteFallback;
     TokenToRanks mEncoder;
     RanksToToken mDecoder;
     TokenToRanks mSpecialTokensEncoder;
     RanksToToken mSpecialTokensDecoder;
+    TokenToRanks mMergeRanks;
     size_t mVocabSize;
 };
 

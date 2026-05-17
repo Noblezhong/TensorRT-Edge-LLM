@@ -21,6 +21,7 @@
 #include "multimodal/internViTRunner.h"
 #include "multimodal/nemotronOmniAudioRunner.h"
 #include "multimodal/nemotronOmniViTRunner.h"
+#include "multimodal/openvlaViTRunner.h"
 #include "multimodal/phi4mmViTRunner.h"
 #include "multimodal/qwenViTRunner.h"
 #include "profiling/layerProfiler.h"
@@ -141,6 +142,10 @@ std::unique_ptr<MultimodalRunner> MultimodalRunner::create(std::string const& mu
     else if (modelType == multimodal::ModelType::INTERNVL)
     {
         multimodalRunner = std::make_unique<InternViTRunner>(multimodalEngineDir, stream);
+    }
+    else if (modelType == multimodal::ModelType::OPENVLA)
+    {
+        multimodalRunner = std::make_unique<OpenVLAViTRunner>(multimodalEngineDir, stream);
     }
     else if (modelType == multimodal::ModelType::PHI4MM)
     {

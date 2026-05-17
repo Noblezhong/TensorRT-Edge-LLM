@@ -272,8 +272,8 @@ protected:
      *         and pretokenizer/vocabulary load; false if file is too large, can't be opened,
      *         contains invalid JSON, or configuration is malformed
      */
-    bool parseTokenizerConfig(
-        std::filesystem::path const& tokenizerFile, TokenToRanks& vocab, TokenToRanks& specialTokens);
+    bool parseTokenizerConfig(std::filesystem::path const& tokenizerFile, TokenToRanks& vocab, TokenToRanks& specialTokens,
+        TokenToRanks& mergeRanks);
 
     /**
      * @brief Parse tokenizer_config.json to extract special token IDs
@@ -325,6 +325,7 @@ protected:
      *         false if partitioning fails due to processing errors
      */
     bool partitionSpecialTokens(std::string const& text, std::forward_list<textPartition>& partitions) const noexcept;
+    std::string normalizeText(std::string const& text) const noexcept;
 
     /**
      * @brief Add BOS token if configured
@@ -353,6 +354,12 @@ protected:
     Rank mPadId;        //!< Padding token ID
     Rank mUnkId;        //!< Unknown token ID
     Rank mImgContextId; //!< Image context token ID
+
+    // Tokenizer normalizer state (minimal support for the OpenFly / Llama-style Sequence normalizer)
+    bool mNormalizeText;                 //!< Whether to apply text normalization
+    bool mNormalizePrependMarker;        //!< Whether to prepend the marker at the start of each text piece
+    bool mNormalizeReplaceSpaces;        //!< Whether to replace ASCII spaces with the marker
+    std::string mNormalizeMarker;        //!< Marker used by the tokenizer normalizer (e.g. "▁")
 
     // Chat template
     ChatTemplateConfig mChatTemplate; //!< Chat template configuration

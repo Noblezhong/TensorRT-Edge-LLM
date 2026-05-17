@@ -27,6 +27,8 @@
 #include "runtime/llmInferenceSpecDecodeRuntime.h"
 #include "runtime/llmRuntimeUtils.h"
 #include "tokenizer/tokenizer.h"
+#include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <getopt.h>
@@ -41,6 +43,188 @@
 
 using namespace trt_edgellm;
 using Json = nlohmann::json;
+
+namespace
+{
+struct OpenFlyActionDecodeConfig
+{
+    bool enabled{false};
+    int32_t vocabSize{0};
+    int32_t nActionBins{256};
+    int32_t actionDim{8};
+    std::vector<float> q01;
+    std::vector<float> q99;
+    std::vector<bool> mask;
+};
+
+struct OpenFlyActionDecodeResult
+{
+    std::vector<int32_t> actionTokenIds;
+    std::vector<int32_t> actionBins;
+    std::vector<float> normalizedActions;
+    std::vector<float> unnormalizedActions;
+    int32_t actionId{-1};
+};
+
+static bool loadOpenFlyActionDecodeConfig(std::string const& multimodalEngineDir, OpenFlyActionDecodeConfig& outCfg)
+{
+    std::vector<std::string> candidatePaths;
+    if (!multimodalEngineDir.empty())
+    {
+        candidatePaths.push_back(multimodalEngineDir + "/config.json");
+        candidatePaths.push_back(multimodalEngineDir + "/visual/config.json");
+    }
+
+    for (auto const& path : candidatePaths)
+    {
+        std::ifstream in(path);
+        if (!in.is_open())
+        {
+            continue;
+        }
+
+        Json cfg;
+        try
+        {
+            cfg = Json::parse(in);
+        }
+        catch (...)
+        {
+            continue;
+        }
+
+        if (cfg.value("model_type", "") != "openvla")
+        {
+            continue;
+        }
+
+        auto const& textCfg = cfg.contains("text_config") ? cfg["text_config"] : cfg;
+        auto const& visionCfg = cfg.contains("vision_config") ? cfg["vision_config"] : cfg;
+        auto const& normStats = visionCfg.contains("norm_stats") ? visionCfg["norm_stats"] : Json{};
+        if (!normStats.is_object() || !normStats.contains("vlnv1"))
+        {
+            continue;
+        }
+
+        auto const& actionStats = normStats["vlnv1"]["action"];
+        if (!actionStats.is_object() || !actionStats.contains("q01") || !actionStats.contains("q99"))
+        {
+            continue;
+        }
+
+        outCfg.enabled = true;
+        outCfg.vocabSize = textCfg.value("vocab_size", 0);
+        outCfg.nActionBins = visionCfg.value("n_action_bins", 256);
+        outCfg.actionDim = static_cast<int32_t>(actionStats["q01"].size());
+        outCfg.q01.clear();
+        outCfg.q99.clear();
+        outCfg.mask.clear();
+        for (auto const& v : actionStats["q01"])
+        {
+            outCfg.q01.push_back(v.get<float>());
+        }
+        for (auto const& v : actionStats["q99"])
+        {
+            outCfg.q99.push_back(v.get<float>());
+        }
+        if (actionStats.contains("mask"))
+        {
+            for (auto const& v : actionStats["mask"])
+            {
+                outCfg.mask.push_back(v.get<bool>());
+            }
+        }
+        else
+        {
+            outCfg.mask.assign(outCfg.q01.size(), true);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+static int32_t convertOpenFlyActionToId(std::vector<float> const& action)
+{
+    static constexpr float kTemplates[10][8] = {
+        {1, 0, 0, 0, 0, 0, 0, 0},  // stop
+        {0, 3, 0, 0, 0, 0, 0, 0},  // move forward
+        {0, 0, 15, 0, 0, 0, 0, 0}, // turn left 30
+        {0, 0, 0, 15, 0, 0, 0, 0}, // turn right 30
+        {0, 0, 0, 0, 2, 0, 0, 0},  // go up
+        {0, 0, 0, 0, 0, 2, 0, 0},  // go down
+        {0, 0, 0, 0, 0, 0, 5, 0},  // move left
+        {0, 0, 0, 0, 0, 0, 0, 5},  // move right
+        {0, 6, 0, 0, 0, 0, 0, 0},  // move forward 6
+        {0, 9, 0, 0, 0, 0, 0, 0},  // move forward 9
+    };
+
+    if (action.size() != 8)
+    {
+        return -1;
+    }
+
+    for (int actionId = 0; actionId < 10; ++actionId)
+    {
+        bool matched = true;
+        for (int i = 0; i < 8; ++i)
+        {
+            if (static_cast<int32_t>(std::llround(action[i])) != static_cast<int32_t>(kTemplates[actionId][i]))
+            {
+                matched = false;
+                break;
+            }
+        }
+        if (matched)
+        {
+            return actionId;
+        }
+    }
+    return 0;
+}
+
+static bool decodeOpenFlyAction(
+    std::vector<int32_t> const& outputIds, OpenFlyActionDecodeConfig const& cfg, OpenFlyActionDecodeResult& out)
+{
+    if (!cfg.enabled || cfg.actionDim <= 0 || cfg.vocabSize <= 0)
+    {
+        return false;
+    }
+    if (static_cast<int32_t>(outputIds.size()) < cfg.actionDim)
+    {
+        return false;
+    }
+
+    // `outputIds` stores the generated response tokens only for OpenFly requests.
+    // The action tokens are the first `actionDim` generated tokens, followed by an optional EOS.
+    out.actionTokenIds.assign(outputIds.begin(), outputIds.begin() + cfg.actionDim);
+    out.actionBins.resize(cfg.actionDim);
+    out.normalizedActions.resize(cfg.actionDim);
+    out.unnormalizedActions.resize(cfg.actionDim);
+
+    int32_t const binCount = std::max(1, cfg.nActionBins - 1);
+    for (int32_t i = 0; i < cfg.actionDim; ++i)
+    {
+        int32_t const tokenId = out.actionTokenIds[i];
+        int32_t discretized = cfg.vocabSize - tokenId;
+        discretized = std::clamp(discretized - 1, 0, binCount - 1);
+        out.actionBins[i] = discretized;
+
+        float const normalized = -1.0F + (2.0F * (static_cast<float>(discretized) + 0.5F))
+                                               / static_cast<float>(binCount);
+        out.normalizedActions[i] = normalized;
+
+        float const q01 = i < static_cast<int32_t>(cfg.q01.size()) ? cfg.q01[i] : 0.0F;
+        float const q99 = i < static_cast<int32_t>(cfg.q99.size()) ? cfg.q99[i] : 0.0F;
+        bool const mask = i < static_cast<int32_t>(cfg.mask.size()) ? cfg.mask[i] : true;
+        float const action = mask ? 0.5F * (normalized + 1.0F) * (q99 - q01) + q01 : normalized;
+        out.unnormalizedActions[i] = action;
+    }
+
+    out.actionId = convertOpenFlyActionToId(out.unnormalizedActions);
+    return true;
+}
+} // namespace
 
 // Enum for command line option IDs (using traditional enum for C library compatibility)
 enum LLMInferenceOptionId : int
@@ -356,6 +540,11 @@ int main(int argc, char* argv[])
     }
     bool profilerEnabled = args.dumpProfile;
     MemoryMonitor memoryMonitor;
+    OpenFlyActionDecodeConfig openFlyDecodeConfig;
+    if (!args.multimodalEngineDir.empty())
+    {
+        (void) loadOpenFlyActionDecodeConfig(args.multimodalEngineDir, openFlyDecodeConfig);
+    }
     // Start memory monitoring at the beginning if profiling is enabled
     if (profilerEnabled)
     {
@@ -503,12 +692,14 @@ int main(int argc, char* argv[])
         {
             nlohmann::json responseJson;
             bool const hasOutputText = requestStatus && batchIdx < response.outputTexts.size();
+            bool const hasOutputIds = requestStatus && batchIdx < response.outputIds.size();
             std::string outputText = hasOutputText ? response.outputTexts[batchIdx] : errorMessage;
             auto const* formattedRequest
                 = batchIdx < request.formattedRequests.size() ? &request.formattedRequests[batchIdx] : nullptr;
             // Validate UTF-8 for output text (inputs are always valid)
             // If invalid UTF-8 detected, error message is returned and original text is logged
             responseJson["output_text"] = sanitizeUtf8ForJson(outputText);
+            responseJson["output_ids"] = hasOutputIds ? Json(response.outputIds[batchIdx]) : Json::array();
             responseJson["request_idx"] = requestIdx;
             responseJson["batch_idx"] = batchIdx;
             // Store messages for reference
@@ -543,6 +734,19 @@ int main(int argc, char* argv[])
             responseJson["formatted_system_prompt"] = formattedRequest ? formattedRequest->formattedSystemPrompt : "";
             responseJson["formatted_complete_request"]
                 = formattedRequest ? formattedRequest->formattedCompleteRequest : "";
+
+            if (openFlyDecodeConfig.enabled && hasOutputIds)
+            {
+                OpenFlyActionDecodeResult actionResult;
+                if (decodeOpenFlyAction(response.outputIds[batchIdx], openFlyDecodeConfig, actionResult))
+                {
+                    responseJson["openfly_action_token_ids"] = actionResult.actionTokenIds;
+                    responseJson["openfly_action_bins"] = actionResult.actionBins;
+                    responseJson["openfly_normalized_action"] = actionResult.normalizedActions;
+                    responseJson["openfly_action"] = actionResult.unnormalizedActions;
+                    responseJson["openfly_action_id"] = actionResult.actionId;
+                }
+            }
             outputData["responses"].push_back(responseJson);
         }
     }

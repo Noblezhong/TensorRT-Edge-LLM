@@ -153,6 +153,7 @@ std::pair<std::unordered_map<std::string, std::string>, std::vector<rt::LLMGener
             std::vector<rt::Message> chatMessages;
             std::vector<rt::imageUtils::ImageData> imageBuffers;
             std::vector<rt::audioUtils::AudioData> audioBuffers;
+            std::vector<int32_t> inputIds;
 
             check::check(messagesArray.size() <= limits::security::kMaxMessagesPerRequest,
                 format::fmtstr("Input rejected: too many messages in request %zu: %zu (max: %zu). Limit defined in %s.",
@@ -254,10 +255,22 @@ std::pair<std::unordered_map<std::string, std::string>, std::vector<rt::LLMGener
                 chatMessages.push_back(chatMsg);
             }
 
+            if (requestItem.contains("input_ids"))
+            {
+                check::check(requestItem["input_ids"].is_array(), "request.input_ids must be an array of integers");
+                inputIds.reserve(requestItem["input_ids"].size());
+                for (auto const& tokenJson : requestItem["input_ids"])
+                {
+                    check::check(tokenJson.is_number_integer(), "request.input_ids must contain only integers");
+                    inputIds.push_back(tokenJson.get<int32_t>());
+                }
+            }
+
             rt::LLMGenerationRequest::Request request;
             request.messages = std::move(chatMessages);
             request.imageBuffers = std::move(imageBuffers);
             request.audioBuffers = std::move(audioBuffers);
+            request.inputIds = std::move(inputIds);
             batchRequest.requests.push_back(std::move(request));
         }
 

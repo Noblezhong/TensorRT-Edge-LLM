@@ -35,12 +35,23 @@ namespace tokenizer
 // Chat template role names
 constexpr char kRoleSystem[] = "system";
 
+namespace
+{
+std::string mergeKey(std::string const& left, std::string const& right)
+{
+    return left + "\x1f" + right;
+}
+} // namespace
+
 Tokenizer::Tokenizer() noexcept
     : mNumVocab(0)
     , mBosId(-1)
     , mEosId(-1)
     , mPadId(-1)
     , mUnkId(-1)
+    , mNormalizeText(false)
+    , mNormalizePrependMarker(false)
+    , mNormalizeReplaceSpaces(false)
     , mInitialized(false)
 {
 }
@@ -66,6 +77,7 @@ bool Tokenizer::loadFromHF(std::filesystem::path const& modelDir)
     // Determine encoder type and load vocabulary
     TokenToRanks vocab;
     TokenToRanks specialTokens;
+    TokenToRanks mergeRanks;
 
     if (!std::filesystem::exists(tokenizerFile))
     {
@@ -74,7 +86,7 @@ bool Tokenizer::loadFromHF(std::filesystem::path const& modelDir)
     }
 
     // Parse main tokenizer configuration
-    if (!parseTokenizerConfig(tokenizerFile, vocab, specialTokens))
+    if (!parseTokenizerConfig(tokenizerFile, vocab, specialTokens, mergeRanks))
     {
         LOG_ERROR("Failed to parse tokenizer configuration");
         return false;
@@ -96,7 +108,7 @@ bool Tokenizer::loadFromHF(std::filesystem::path const& modelDir)
 
     if (mTokenEncoder)
     {
-        mTokenEncoder->initialize(vocab, specialTokens);
+        mTokenEncoder->initialize(vocab, specialTokens, mergeRanks);
     }
 
     // Store special tokens for fast lookup
@@ -124,8 +136,8 @@ bool Tokenizer::loadFromHF(std::filesystem::path const& modelDir)
 }
 
 // Processes tokenizer.json
-bool Tokenizer::parseTokenizerConfig(
-    std::filesystem::path const& tokenizerFile, TokenToRanks& vocab, TokenToRanks& specialTokens)
+bool Tokenizer::parseTokenizerConfig(std::filesystem::path const& tokenizerFile, TokenToRanks& vocab,
+    TokenToRanks& specialTokens, TokenToRanks& mergeRanks)
 {
     // Validate file size before reading
     if (!validateFileSize(tokenizerFile, limits::tokenizer::kMaxConfigFileSizeBytes))
@@ -154,6 +166,66 @@ bool Tokenizer::parseTokenizerConfig(
         return false;
     }
 
+    // Parse a minimal normalizer chain. OpenFly uses the common BPE normalizer:
+    //   Sequence([Prepend("▁"), Replace(" ", "▁")])
+    mNormalizeText = false;
+    mNormalizePrependMarker = false;
+    mNormalizeReplaceSpaces = false;
+    mNormalizeMarker.clear();
+    if (jsonData.contains("normalizer") && jsonData["normalizer"].is_object())
+    {
+        auto const& normalizer = jsonData["normalizer"];
+        if (normalizer.contains("type") && normalizer["type"].is_string()
+            && normalizer["type"].get<std::string>() == "Sequence" && normalizer.contains("normalizers")
+            && normalizer["normalizers"].is_array())
+        {
+            for (auto const& step : normalizer["normalizers"])
+            {
+                if (!step.is_object() || !step.contains("type") || !step["type"].is_string())
+                {
+                    continue;
+                }
+                std::string const type = step["type"].get<std::string>();
+                if (type == "Prepend" && step.contains("prepend") && step["prepend"].is_string())
+                {
+                    mNormalizeText = true;
+                    mNormalizePrependMarker = true;
+                    mNormalizeMarker = step["prepend"].get<std::string>();
+                }
+                else if (type == "Replace" && step.contains("pattern") && step.contains("content")
+                    && step["content"].is_string())
+                {
+                    if (step["content"].get<std::string>() == "▁" && step["pattern"].is_object()
+                        && step["pattern"].contains("String") && step["pattern"]["String"].is_string()
+                        && step["pattern"]["String"].get<std::string>() == " ")
+                    {
+                        mNormalizeText = true;
+                        mNormalizeReplaceSpaces = true;
+                        if (mNormalizeMarker.empty())
+                        {
+                            mNormalizeMarker = "▁";
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    mergeRanks.clear();
+    if (jsonData.contains("model") && jsonData["model"].is_object() && jsonData["model"].contains("merges")
+        && jsonData["model"]["merges"].is_array())
+    {
+        Rank mergeRank = 0;
+        for (auto const& merge : jsonData["model"]["merges"])
+        {
+            if (!merge.is_array() || merge.size() != 2 || !merge[0].is_string() || !merge[1].is_string())
+            {
+                continue;
+            }
+            mergeRanks[mergeKey(merge[0].get<std::string>(), merge[1].get<std::string>())] = mergeRank++;
+        }
+    }
+
     // Create pretokenizer
     if (jsonData.contains("pre_tokenizer") && !jsonData["pre_tokenizer"].is_null())
     {
@@ -177,6 +249,7 @@ bool Tokenizer::parseTokenizerConfig(
     }
 
     TokenEncoder::Type encoderType = determineEncoderType(jsonData["model"]);
+    bool byteFallback = jsonData["model"].value("byte_fallback", false);
     if (!loadVocabulary(jsonData["model"], vocab))
     {
         LOG_ERROR("Failed to load vocabulary");
@@ -190,7 +263,7 @@ bool Tokenizer::parseTokenizerConfig(
     }
 
     // Create token encoder
-    mTokenEncoder = std::make_unique<TokenEncoder>(encoderType);
+    mTokenEncoder = std::make_unique<TokenEncoder>(encoderType, byteFallback);
     return true;
 }
 
@@ -487,6 +560,11 @@ std::vector<Rank> Tokenizer::encode(std::string const& text, bool addBos, bool a
                 // Process raw text partition
                 std::string piece = part.rawText.substr(part.offset, part.length);
 
+                if (mNormalizeText)
+                {
+                    piece = normalizeText(piece);
+                }
+
                 // Process through pretokenizer
                 std::vector<std::string> pieces;
                 try
@@ -520,6 +598,36 @@ std::vector<Rank> Tokenizer::encode(std::string const& text, bool addBos, bool a
     }
 
     return output;
+}
+
+std::string Tokenizer::normalizeText(std::string const& text) const noexcept
+{
+    if (!mNormalizeText)
+    {
+        return text;
+    }
+
+    std::string normalized;
+    normalized.reserve(text.size() + 8);
+
+    if (mNormalizePrependMarker && !mNormalizeMarker.empty())
+    {
+        normalized += mNormalizeMarker;
+    }
+
+    for (char c : text)
+    {
+        if (mNormalizeReplaceSpaces && c == ' ' && !mNormalizeMarker.empty())
+        {
+            normalized += mNormalizeMarker;
+        }
+        else
+        {
+            normalized.push_back(c);
+        }
+    }
+
+    return normalized;
 }
 
 bool Tokenizer::partitionSpecialTokens(
@@ -881,6 +989,11 @@ bool Tokenizer::applyChatTemplate(rt::LLMGenerationRequest::Request const& reque
             }
             else
             {
+                if (!applyChatTemplate)
+                {
+                    // Raw mode is text-only concatenation; multimodal placeholders are injected by model runners.
+                    continue;
+                }
                 // Get content type format
                 auto contentTypeIt = mChatTemplate.contentTypes.find(contentItem.type);
                 if (contentTypeIt != mChatTemplate.contentTypes.end())
