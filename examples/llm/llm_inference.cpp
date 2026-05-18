@@ -113,7 +113,19 @@ static bool loadOpenFlyActionDecodeConfig(std::string const& multimodalEngineDir
         }
 
         outCfg.enabled = true;
-        outCfg.vocabSize = textCfg.value("vocab_size", 0);
+        // OpenFly/OpenVLA checkpoints store the effective vocab boundary as pad_token_id
+        // in the exported multimodal config. Use it directly if present; otherwise fall back
+        // to the raw vocab size minus pad_to_multiple_of for checkpoint-style configs.
+        int32_t const padTokenId = textCfg.value("pad_token_id", -1);
+        if (padTokenId > 0)
+        {
+            outCfg.vocabSize = padTokenId;
+        }
+        else
+        {
+            int32_t const padToMultipleOf = textCfg.value("pad_to_multiple_of", 0);
+            outCfg.vocabSize = std::max(0, textCfg.value("vocab_size", 0) - padToMultipleOf);
+        }
         outCfg.nActionBins = visionCfg.value("n_action_bins", 256);
         outCfg.actionDim = static_cast<int32_t>(actionStats["q01"].size());
         outCfg.q01.clear();
