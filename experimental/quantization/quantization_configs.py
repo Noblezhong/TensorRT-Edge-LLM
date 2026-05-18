@@ -130,9 +130,11 @@ DISABLE_NON_LLM = {
             "enable": False
         }
         for k in (
+            "*vision_backbone.*",
             "*visual.*",
             "*vision_tower.*",
             "*multi_modal_projector.*",
+            "*projector.*",
             "*mlp1.*",
             "*audio_tower.*",
             "*audio_embed.*",
