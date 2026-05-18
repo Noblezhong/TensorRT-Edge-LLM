@@ -31,6 +31,15 @@ namespace exampleUtils
 {
 
 /*!
+ * @brief Parse an llm_inference-style JSON request object.
+ *
+ * This accepts the same schema as parseRequestFile(), but operates on an already parsed JSON object.
+ * It is used by both the file-based CLI path and the in-memory socket server path.
+ */
+std::pair<std::unordered_map<std::string, std::string>, std::vector<rt::LLMGenerationRequest>> parseRequestJson(
+    nlohmann::json const& inputData, int32_t batchSizeOverride = -1, int64_t maxGenerateLengthOverride = -1);
+
+/*!
  * @brief Parse the llm_inference-style JSON input file.
  *
  * Reads a JSON file with the following top-level schema:

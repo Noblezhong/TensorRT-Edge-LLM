@@ -28,18 +28,26 @@
 #include "runtime/llmRuntimeUtils.h"
 #include "tokenizer/tokenizer.h"
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <getopt.h>
 #include <iomanip>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <arpa/inet.h>
 #include <string>
 #include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 using namespace trt_edgellm;
 using Json = nlohmann::json;
@@ -236,6 +244,119 @@ static bool decodeOpenFlyAction(
     out.actionId = convertOpenFlyActionToId(out.unnormalizedActions);
     return true;
 }
+
+static bool processRequestBatch(rt::LLMInferenceSpecDecodeRuntime& runtime, cudaStream_t stream,
+    std::vector<rt::LLMGenerationRequest>& batchedRequests, OpenFlyActionDecodeConfig const& openFlyDecodeConfig,
+    Json& outputData, bool dumpOutput)
+{
+    outputData = Json::object();
+    outputData["responses"] = nlohmann::json::array();
+
+    bool hasFailedRequest = false;
+    std::string errorMessage = "TensorRT Edge LLM cannot handle this request. Fails.";
+    size_t failedCount = 0;
+
+    LOG_INFO("Processing %zu batched requests...", batchedRequests.size());
+    for (size_t requestIdx = 0; requestIdx < batchedRequests.size(); ++requestIdx)
+    {
+        auto& request = batchedRequests[requestIdx];
+        rt::LLMGenerationResponse response;
+
+        size_t progressInterval = std::max(size_t(1), std::min(batchedRequests.size() / 10, size_t(100)));
+        if ((requestIdx + 1) % progressInterval == 0 || requestIdx == 0 || requestIdx == batchedRequests.size() - 1)
+        {
+            LOG_INFO("Progress: %zu/%zu (%f%%)", requestIdx + 1, batchedRequests.size(),
+                100.0 * (requestIdx + 1) / batchedRequests.size());
+        }
+
+        bool requestStatus = runtime.handleRequest(request, response, stream);
+        if (requestStatus)
+        {
+            if (dumpOutput)
+            {
+                for (size_t batchIdx = 0; batchIdx < response.outputTexts.size(); ++batchIdx)
+                {
+                    LOG_INFO("Response for request %zu batch %zu: %s", requestIdx, batchIdx,
+                        response.outputTexts[batchIdx].c_str());
+                }
+            }
+        }
+        else
+        {
+            hasFailedRequest = true;
+            failedCount++;
+            LOG_ERROR("*** FAILED *** Request %zu failed to process!", requestIdx);
+        }
+
+        for (size_t batchIdx = 0; batchIdx < request.requests.size(); ++batchIdx)
+        {
+            nlohmann::json responseJson;
+            bool const hasOutputText = requestStatus && batchIdx < response.outputTexts.size();
+            bool const hasOutputIds = requestStatus && batchIdx < response.outputIds.size();
+            std::string outputText = hasOutputText ? response.outputTexts[batchIdx] : errorMessage;
+            auto const* formattedRequest
+                = batchIdx < request.formattedRequests.size() ? &request.formattedRequests[batchIdx] : nullptr;
+            responseJson["output_text"] = sanitizeUtf8ForJson(outputText);
+            responseJson["output_ids"] = hasOutputIds ? Json(response.outputIds[batchIdx]) : Json::array();
+            responseJson["request_idx"] = requestIdx;
+            responseJson["batch_idx"] = batchIdx;
+
+            nlohmann::json messagesJson = nlohmann::json::array();
+            for (auto const& msg : request.requests[batchIdx].messages)
+            {
+                nlohmann::json msgJson;
+                msgJson["role"] = msg.role;
+                msgJson["content"] = nlohmann::json::array();
+                for (auto const& content : msg.contents)
+                {
+                    nlohmann::json contentJson;
+                    contentJson["type"] = content.type;
+                    if (content.type == "text")
+                    {
+                        contentJson["text"] = content.content;
+                    }
+                    else if (content.type == "image")
+                    {
+                        contentJson["image"] = content.content;
+                    }
+                    else if (content.type == "video")
+                    {
+                        contentJson["video"] = content.content;
+                    }
+                    msgJson["content"].push_back(contentJson);
+                }
+                messagesJson.push_back(msgJson);
+            }
+            responseJson["messages"] = messagesJson;
+            responseJson["formatted_system_prompt"] = formattedRequest ? formattedRequest->formattedSystemPrompt : "";
+            responseJson["formatted_complete_request"]
+                = formattedRequest ? formattedRequest->formattedCompleteRequest : "";
+
+            if (openFlyDecodeConfig.enabled && hasOutputIds)
+            {
+                OpenFlyActionDecodeResult actionResult;
+                if (decodeOpenFlyAction(response.outputIds[batchIdx], openFlyDecodeConfig, actionResult))
+                {
+                    responseJson["openfly_action_token_ids"] = actionResult.actionTokenIds;
+                    responseJson["openfly_action_bins"] = actionResult.actionBins;
+                    responseJson["openfly_normalized_action"] = actionResult.normalizedActions;
+                    responseJson["openfly_action"] = actionResult.unnormalizedActions;
+                    responseJson["openfly_action_id"] = actionResult.actionId;
+                }
+            }
+        outputData["responses"].push_back(responseJson);
+    }
+    }
+
+    LOG_INFO("Processing complete: %zu/%zu batched requests successful", batchedRequests.size() - failedCount,
+        batchedRequests.size());
+    if (failedCount > 0)
+    {
+        LOG_ERROR("*** %zu BATCHED REQUESTS FAILED ***", failedCount);
+    }
+
+    return !hasFailedRequest;
+}
 } // namespace
 
 // Enum for command line option IDs (using traditional enum for C library compatibility)
@@ -256,7 +377,9 @@ enum LLMInferenceOptionId : int
     EAGLE_DRAFT_STEP = 912,
     EAGLE_VERIFY_TREE_SIZE = 913,
     BATCH_SIZE = 914,
-    MAX_GENERATE_LENGTH = 915
+    MAX_GENERATE_LENGTH = 915,
+    SERVE = 916,
+    SOCKET_PATH = 917
 };
 
 // Struct to hold Eagle-specific arguments for speculative decoding
@@ -281,6 +404,7 @@ struct EagleArgs
 struct LLMInferenceArgs
 {
     bool help{false};
+    bool serve{false};
     std::string engineDir;
     std::string multimodalEngineDir{""};
     std::string inputFile;
@@ -290,6 +414,7 @@ struct LLMInferenceArgs
     bool dumpProfile{false};
     int32_t warmup{0};
     bool dumpOutput{false};
+    std::string socketPath{""};
     // Override parameters (only batchSize and maxGenerateLength can be overridden via CLI)
     // For other sampling parameters (temperature, top_p, top_k), please specify them in the input JSON file
     int32_t batchSize{-1};         // -1 means use value from input file
@@ -303,7 +428,7 @@ void printUsage(char const* programName)
               << " [--help] [--engineDir=<path to engine directory>] [--multimodalEngineDir=<path to multimodal engine "
                  "directory>] [--inputFile=<path to input file>] [--outputFile=<path to output file>] "
                  "[--dumpProfile] [--profileOutputFile=<path to profile output file>] [--warmup=<number>] [--debug] "
-                 "[--dumpOutput] [--batchSize=<number>] [--maxGenerateLength=<number>] [--eagle] "
+                 "[--dumpOutput] [--batchSize=<number>] [--maxGenerateLength=<number>] [--serve] [--socketPath=<path>] [--eagle] "
                  "[--eagleDraftTopK=<number>] [--eagleDraftStep=<number>] "
                  "[--eagleVerifyTreeSize=<number>]"
               << std::endl;
@@ -322,6 +447,9 @@ void printUsage(char const* programName)
     std::cerr << "  --maxGenerateLength       Override max generate length from input file" << std::endl;
     std::cerr << "                            NOTE: For sampling parameters (temperature, top_p, top_k)," << std::endl;
     std::cerr << "                            please specify them in the input JSON file instead of CLI" << std::endl;
+    std::cerr << "  --serve                   Keep one engine instance alive and read request commands from stdin"
+              << std::endl;
+    std::cerr << "  --socketPath              Optional Unix domain socket path for persistent serve mode" << std::endl;
     std::cerr << "  --eagle                   Enable Eagle speculative decoding mode" << std::endl;
     std::cerr << "  --eagleDraftTopK          Number of tokens selected per drafting step (default: 10)" << std::endl;
     std::cerr << "                            Controls branching factor at each draft tree level" << std::endl;
@@ -343,6 +471,8 @@ bool parseLLMInferenceArgs(LLMInferenceArgs& args, int argc, char* argv[])
         {"profileOutputFile", required_argument, 0, LLMInferenceOptionId::PROFILE_OUTPUT_FILE},
         {"warmup", required_argument, 0, LLMInferenceOptionId::WARMUP},
         {"dumpOutput", no_argument, 0, LLMInferenceOptionId::DUMP_OUTPUT},
+        {"serve", no_argument, 0, LLMInferenceOptionId::SERVE},
+        {"socketPath", required_argument, 0, LLMInferenceOptionId::SOCKET_PATH},
         {"eagle", no_argument, 0, LLMInferenceOptionId::EAGLE},
         {"eagleDraftTopK", required_argument, 0, LLMInferenceOptionId::EAGLE_DRAFT_TOP_K},
         {"eagleDraftStep", required_argument, 0, LLMInferenceOptionId::EAGLE_DRAFT_STEP},
@@ -380,6 +510,8 @@ bool parseLLMInferenceArgs(LLMInferenceArgs& args, int argc, char* argv[])
             }
             break;
         case LLMInferenceOptionId::DUMP_OUTPUT: args.dumpOutput = true; break;
+        case LLMInferenceOptionId::SERVE: args.serve = true; break;
+        case LLMInferenceOptionId::SOCKET_PATH: args.socketPath = optarg; break;
         case LLMInferenceOptionId::EAGLE: args.eagleArgs.enabled = true; break;
         case LLMInferenceOptionId::EAGLE_DRAFT_TOP_K:
             try
@@ -465,11 +597,14 @@ bool parseLLMInferenceArgs(LLMInferenceArgs& args, int argc, char* argv[])
         }
     }
 
-    LOG_INFO("args.inputFile: %s", args.inputFile.c_str());
-    if (args.inputFile.empty())
+    if (!args.serve)
     {
-        LOG_ERROR("ERROR: --inputFile is required");
-        return false;
+        LOG_INFO("args.inputFile: %s", args.inputFile.c_str());
+        if (args.inputFile.empty())
+        {
+            LOG_ERROR("ERROR: --inputFile is required");
+            return false;
+        }
     }
     LOG_INFO("args.engineDir: %s", args.engineDir.c_str());
     if (args.engineDir.empty())
@@ -482,12 +617,23 @@ bool parseLLMInferenceArgs(LLMInferenceArgs& args, int argc, char* argv[])
         LOG_INFO("args.multimodalEngineDir: %s", args.multimodalEngineDir.c_str());
     }
 
-    if (args.outputFile.empty())
+    if (!args.serve && args.outputFile.empty())
     {
         LOG_ERROR("ERROR: --outputFile is required");
         return false;
     }
-    LOG_INFO("args.outputFile: %s", args.outputFile.c_str());
+    if (!args.serve)
+    {
+        LOG_INFO("args.outputFile: %s", args.outputFile.c_str());
+    }
+    else
+    {
+        LOG_INFO("Serve mode enabled");
+    }
+    if (!args.socketPath.empty())
+    {
+        LOG_INFO("args.socketPath: %s", args.socketPath.c_str());
+    }
 
     if (args.dumpOutput)
     {
@@ -536,6 +682,235 @@ std::pair<std::unordered_map<std::string, std::string>, std::vector<rt::LLMGener
     return exampleUtils::parseRequestFile(inputFilePath, batchSizeOverride, maxGenerateLengthOverride);
 }
 
+static bool readExact(int fd, void* buffer, size_t bytes)
+{
+    size_t total = 0;
+    auto* ptr = static_cast<std::uint8_t*>(buffer);
+    while (total < bytes)
+    {
+        ssize_t n = ::read(fd, ptr + total, bytes - total);
+        if (n == 0)
+        {
+            return false;
+        }
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return false;
+        }
+        total += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+static bool writeExact(int fd, void const* buffer, size_t bytes)
+{
+    size_t total = 0;
+    auto const* ptr = static_cast<std::uint8_t const*>(buffer);
+    while (total < bytes)
+    {
+        ssize_t n = ::write(fd, ptr + total, bytes - total);
+        if (n < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return false;
+        }
+        total += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+static bool readFrame(int fd, std::string& payload)
+{
+    std::uint32_t lenBe = 0;
+    if (!readExact(fd, &lenBe, sizeof(lenBe)))
+    {
+        return false;
+    }
+    std::uint32_t len = ntohl(lenBe);
+    payload.resize(len);
+    if (len == 0)
+    {
+        return true;
+    }
+    return readExact(fd, payload.data(), len);
+}
+
+static bool writeFrame(int fd, std::string const& payload)
+{
+    std::uint32_t lenBe = htonl(static_cast<std::uint32_t>(payload.size()));
+    return writeExact(fd, &lenBe, sizeof(lenBe)) && (payload.empty() || writeExact(fd, payload.data(), payload.size()));
+}
+
+static bool createUnixSocketServer(std::string const& socketPath, int& serverFd)
+{
+    serverFd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (serverFd < 0)
+    {
+        LOG_ERROR("Failed to create Unix socket: %s", std::strerror(errno));
+        return false;
+    }
+
+    ::unlink(socketPath.c_str());
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    if (socketPath.size() >= sizeof(addr.sun_path))
+    {
+        LOG_ERROR("Socket path too long: %s", socketPath.c_str());
+        ::close(serverFd);
+        serverFd = -1;
+        return false;
+    }
+    std::strncpy(addr.sun_path, socketPath.c_str(), sizeof(addr.sun_path) - 1);
+
+    if (::bind(serverFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0)
+    {
+        LOG_ERROR("Failed to bind Unix socket %s: %s", socketPath.c_str(), std::strerror(errno));
+        ::close(serverFd);
+        serverFd = -1;
+        return false;
+    }
+    if (::listen(serverFd, 1) < 0)
+    {
+        LOG_ERROR("Failed to listen on Unix socket %s: %s", socketPath.c_str(), std::strerror(errno));
+        ::close(serverFd);
+        serverFd = -1;
+        return false;
+    }
+    return true;
+}
+
+static int acceptUnixSocketClient(int serverFd)
+{
+    for (;;)
+    {
+        int clientFd = ::accept(serverFd, nullptr, nullptr);
+        if (clientFd >= 0)
+        {
+            return clientFd;
+        }
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        LOG_ERROR("Failed to accept Unix socket client: %s", std::strerror(errno));
+        return -1;
+    }
+}
+
+static bool serveUnixSocket(
+    std::string const& socketPath, rt::LLMInferenceSpecDecodeRuntime& runtime, cudaStream_t stream,
+    OpenFlyActionDecodeConfig const& openFlyDecodeConfig)
+{
+    int serverFd = -1;
+    if (!createUnixSocketServer(socketPath, serverFd))
+    {
+        return false;
+    }
+    LOG_INFO("Serve mode enabled. Waiting for Unix socket client at %s...", socketPath.c_str());
+
+    int clientFd = acceptUnixSocketClient(serverFd);
+    if (clientFd < 0)
+    {
+        ::close(serverFd);
+        ::unlink(socketPath.c_str());
+        return false;
+    }
+
+    LOG_INFO("Unix socket client connected.");
+    bool serviceSuccess = true;
+    for (;;)
+    {
+        std::string requestPayload;
+        if (!readFrame(clientFd, requestPayload))
+        {
+            LOG_INFO("Unix socket client disconnected.");
+            break;
+        }
+        if (requestPayload.empty())
+        {
+            continue;
+        }
+
+        Json command;
+        try
+        {
+            command = Json::parse(requestPayload);
+        }
+        catch (Json::parse_error const& e)
+        {
+            LOG_ERROR("Socket command parse failed: %s", e.what());
+            Json errorResponse = Json::object();
+            errorResponse["ok"] = false;
+            errorResponse["error"] = std::string("parse error: ") + e.what();
+            (void) writeFrame(clientFd, errorResponse.dump());
+            continue;
+        }
+
+        std::string const commandName = command.value("command", "process");
+        if (commandName == "quit")
+        {
+            LOG_INFO("Socket mode received quit command.");
+            break;
+        }
+        if (commandName != "process")
+        {
+            Json errorResponse = Json::object();
+            errorResponse["ok"] = false;
+            errorResponse["error"] = "Unsupported command: " + commandName;
+            (void) writeFrame(clientFd, errorResponse.dump());
+            continue;
+        }
+
+        Json requestData = command.contains("request") ? command["request"] : command;
+        std::unordered_map<std::string, std::string> requestLoraWeightsMap;
+        std::vector<rt::LLMGenerationRequest> requestBatchedRequests;
+        try
+        {
+            std::tie(requestLoraWeightsMap, requestBatchedRequests)
+                = exampleUtils::parseRequestJson(requestData, -1, -1);
+        }
+        catch (std::exception const& e)
+        {
+            LOG_ERROR("Socket request parse failed: %s", e.what());
+            Json errorResponse = Json::object();
+            errorResponse["ok"] = false;
+            errorResponse["error"] = e.what();
+            (void) writeFrame(clientFd, errorResponse.dump());
+            continue;
+        }
+
+        if (!requestLoraWeightsMap.empty())
+        {
+            LOG_WARNING("Socket mode ignores inline LoRA weights map; using parsed request only");
+        }
+
+        Json outputData;
+        bool ok = processRequestBatch(
+            runtime, stream, requestBatchedRequests, openFlyDecodeConfig, outputData, command.value("dumpOutput", false));
+        outputData["ok"] = ok;
+        std::string responsePayload = outputData.dump();
+        if (!writeFrame(clientFd, responsePayload))
+        {
+            LOG_ERROR("Failed to write socket response");
+            serviceSuccess = false;
+            break;
+        }
+    }
+
+    ::close(clientFd);
+    ::close(serverFd);
+    ::unlink(socketPath.c_str());
+    return serviceSuccess;
+}
+
 int main(int argc, char* argv[])
 {
     NVTX_SCOPED_RANGE(nvtx_main, "llm_inference");
@@ -564,26 +939,29 @@ int main(int argc, char* argv[])
     }
 
     auto pluginHandles = loadEdgellmPluginLib();
-    // load input file and parse to requests
+    // load input file and parse to requests (one-shot mode only)
     std::unordered_map<std::string, std::string> loraWeightsMap;
     std::vector<rt::LLMGenerationRequest> batchedRequests;
-    try
+    if (!args.serve)
     {
-        std::tie(loraWeightsMap, batchedRequests)
-            = parseInputFile(args.inputFile, args.batchSize, args.maxGenerateLength);
-        LOG_INFO("Successfully parsed %zu LoRA weights from input file.", loraWeightsMap.size());
-        LOG_INFO("Successfully parsed %zu batches of requests from input file.", batchedRequests.size());
-    }
-    catch (std::exception const& e)
-    {
-        LOG_ERROR("Failed to parse input file: %s", e.what());
-        return EXIT_FAILURE;
-    }
+        try
+        {
+            std::tie(loraWeightsMap, batchedRequests)
+                = parseInputFile(args.inputFile, args.batchSize, args.maxGenerateLength);
+            LOG_INFO("Successfully parsed %zu LoRA weights from input file.", loraWeightsMap.size());
+            LOG_INFO("Successfully parsed %zu batches of requests from input file.", batchedRequests.size());
+        }
+        catch (std::exception const& e)
+        {
+            LOG_ERROR("Failed to parse input file: %s", e.what());
+            return EXIT_FAILURE;
+        }
 
-    if (batchedRequests.empty())
-    {
-        LOG_ERROR("No valid requests found in input file.");
-        return EXIT_FAILURE;
+        if (batchedRequests.empty())
+        {
+            LOG_ERROR("No valid requests found in input file.");
+            return EXIT_FAILURE;
+        }
     }
 
     // Create unified runtime (handles both vanilla and Eagle spec-decode modes)
@@ -626,6 +1004,88 @@ int main(int argc, char* argv[])
         LOG_WARNING("Failed to capture CUDA graph for decoding, proceeding with normal engine execution.");
     }
 
+    if (args.serve)
+    {
+        if (!args.socketPath.empty())
+        {
+            bool const ok = serveUnixSocket(args.socketPath, *runtime, stream, openFlyDecodeConfig);
+            CUDA_CHECK(cudaStreamDestroy(stream));
+            return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+
+        LOG_INFO("Serve mode enabled. Waiting for JSON commands on stdin...");
+        std::string commandLine;
+        while (std::getline(std::cin, commandLine))
+        {
+            if (commandLine.empty())
+            {
+                continue;
+            }
+
+            Json command;
+            try
+            {
+                command = Json::parse(commandLine);
+            }
+            catch (Json::parse_error const& e)
+            {
+                LOG_ERROR("Serve mode command parse failed: %s", e.what());
+                continue;
+            }
+
+            if (command.value("command", "process") == "quit")
+            {
+                LOG_INFO("Serve mode received quit command.");
+                break;
+            }
+
+            std::string const requestInputFile = command.value("inputFile", "");
+            std::string const requestOutputFile = command.value("outputFile", "");
+            bool const requestDumpOutput = command.value("dumpOutput", false);
+            if (requestInputFile.empty() || requestOutputFile.empty())
+            {
+                LOG_ERROR("Serve mode command must contain inputFile and outputFile");
+                continue;
+            }
+
+            std::unordered_map<std::string, std::string> requestLoraWeightsMap;
+            std::vector<rt::LLMGenerationRequest> requestBatchedRequests;
+            try
+            {
+                std::tie(requestLoraWeightsMap, requestBatchedRequests)
+                    = parseInputFile(requestInputFile, args.batchSize, args.maxGenerateLength);
+                LOG_INFO("Serve mode parsed %zu LoRA weights from input file.", requestLoraWeightsMap.size());
+                LOG_INFO("Serve mode parsed %zu batches of requests from input file.", requestBatchedRequests.size());
+            }
+            catch (std::exception const& e)
+            {
+                LOG_ERROR("Serve mode failed to parse request input file: %s", e.what());
+                continue;
+            }
+
+            Json outputData;
+            (void) processRequestBatch(*runtime, stream, requestBatchedRequests, openFlyDecodeConfig, outputData,
+                requestDumpOutput);
+            try
+            {
+                std::ofstream outputFileStream(requestOutputFile);
+                if (outputFileStream.is_open())
+                {
+                    outputFileStream << outputData.dump(4);
+                    outputFileStream.close();
+                    LOG_INFO("All responses exported to: %s", requestOutputFile.c_str());
+                }
+            }
+            catch (std::exception const& e)
+            {
+                LOG_ERROR("Failed to write output file: %s", e.what());
+            }
+        }
+
+        CUDA_CHECK(cudaStreamDestroy(stream));
+        return EXIT_SUCCESS;
+    }
+
     // Perform warmup runs if requested
     if (args.warmup > 0)
     {
@@ -653,122 +1113,28 @@ int main(int argc, char* argv[])
         setProfilingEnabled(true);
     }
 
-    // Structure to collect all responses for JSON export
-    nlohmann::json outputData;
-    outputData["input_file"] = args.inputFile;
-    outputData["responses"] = nlohmann::json::array();
-
-    bool hasFailedRequest = false;
-    std::string errorMessage = "TensorRT Edge LLM cannot handle this request. Fails.";
-    size_t failedCount = 0;
-
-    // Process each request with progress indication
-    LOG_INFO("Processing %zu batched requests...", batchedRequests.size());
-    for (size_t requestIdx = 0; requestIdx < batchedRequests.size(); ++requestIdx)
+    Json outputData;
+    bool const requestSuccess
+        = processRequestBatch(*runtime, stream, batchedRequests, openFlyDecodeConfig, outputData, args.dumpOutput);
+    try
     {
-        auto& request = batchedRequests[requestIdx];
-        rt::LLMGenerationResponse response;
-
-        // Show progress every 10% or every 100 requests, whichever is smaller
-        size_t progressInterval = std::max(size_t(1), std::min(batchedRequests.size() / 10, size_t(100)));
-        if ((requestIdx + 1) % progressInterval == 0 || requestIdx == 0 || requestIdx == batchedRequests.size() - 1)
+        std::ofstream outputFileStream(args.outputFile);
+        if (outputFileStream.is_open())
         {
-            LOG_INFO("Progress: %zu/%zu (%f%%)", requestIdx + 1, batchedRequests.size(),
-                100.0 * (requestIdx + 1) / batchedRequests.size());
-        }
-
-        bool requestStatus = runtime->handleRequest(request, response, stream);
-
-        if (requestStatus)
-        {
-            // Display inference output to console if --dumpOutput is enabled
-            if (args.dumpOutput)
-            {
-                for (size_t batchIdx = 0; batchIdx < response.outputTexts.size(); ++batchIdx)
-                {
-                    LOG_INFO("Response for request %zu batch %zu: %s", requestIdx, batchIdx,
-                        response.outputTexts[batchIdx].c_str());
-                }
-            }
+            outputFileStream << outputData.dump(4);
+            outputFileStream.close();
+            LOG_INFO("All responses exported to: %s", args.outputFile.c_str());
         }
         else
         {
-            // Handle failed request - highlight failures
-            hasFailedRequest = true;
-            failedCount++;
-            LOG_ERROR("*** FAILED *** Request %zu failed to process!", requestIdx);
-        }
-
-        // Add to JSON output with UTF-8 validation on output text
-        for (size_t batchIdx = 0; batchIdx < request.requests.size(); ++batchIdx)
-        {
-            nlohmann::json responseJson;
-            bool const hasOutputText = requestStatus && batchIdx < response.outputTexts.size();
-            bool const hasOutputIds = requestStatus && batchIdx < response.outputIds.size();
-            std::string outputText = hasOutputText ? response.outputTexts[batchIdx] : errorMessage;
-            auto const* formattedRequest
-                = batchIdx < request.formattedRequests.size() ? &request.formattedRequests[batchIdx] : nullptr;
-            // Validate UTF-8 for output text (inputs are always valid)
-            // If invalid UTF-8 detected, error message is returned and original text is logged
-            responseJson["output_text"] = sanitizeUtf8ForJson(outputText);
-            responseJson["output_ids"] = hasOutputIds ? Json(response.outputIds[batchIdx]) : Json::array();
-            responseJson["request_idx"] = requestIdx;
-            responseJson["batch_idx"] = batchIdx;
-            // Store messages for reference
-            nlohmann::json messagesJson = nlohmann::json::array();
-            for (auto const& msg : request.requests[batchIdx].messages)
-            {
-                nlohmann::json msgJson;
-                msgJson["role"] = msg.role;
-                msgJson["content"] = nlohmann::json::array();
-                for (auto const& content : msg.contents)
-                {
-                    nlohmann::json contentJson;
-                    contentJson["type"] = content.type;
-                    if (content.type == "text")
-                    {
-                        contentJson["text"] = content.content;
-                    }
-                    else if (content.type == "image")
-                    {
-                        contentJson["image"] = content.content;
-                    }
-                    else if (content.type == "video")
-                    {
-                        contentJson["video"] = content.content;
-                    }
-                    msgJson["content"].push_back(contentJson);
-                }
-                messagesJson.push_back(msgJson);
-            }
-            responseJson["messages"] = messagesJson;
-            // Store formatted prompts for reference
-            responseJson["formatted_system_prompt"] = formattedRequest ? formattedRequest->formattedSystemPrompt : "";
-            responseJson["formatted_complete_request"]
-                = formattedRequest ? formattedRequest->formattedCompleteRequest : "";
-
-            if (openFlyDecodeConfig.enabled && hasOutputIds)
-            {
-                OpenFlyActionDecodeResult actionResult;
-                if (decodeOpenFlyAction(response.outputIds[batchIdx], openFlyDecodeConfig, actionResult))
-                {
-                    responseJson["openfly_action_token_ids"] = actionResult.actionTokenIds;
-                    responseJson["openfly_action_bins"] = actionResult.actionBins;
-                    responseJson["openfly_normalized_action"] = actionResult.normalizedActions;
-                    responseJson["openfly_action"] = actionResult.unnormalizedActions;
-                    responseJson["openfly_action_id"] = actionResult.actionId;
-                }
-            }
-            outputData["responses"].push_back(responseJson);
+            LOG_ERROR("Failed to open output file: %s", args.outputFile.c_str());
+            return EXIT_FAILURE;
         }
     }
-
-    // Final processing summary
-    LOG_INFO("Processing complete: %zu/%zu batched requests successful", batchedRequests.size() - failedCount,
-        batchedRequests.size());
-    if (failedCount > 0)
+    catch (std::exception const& e)
     {
-        LOG_ERROR("*** %zu BATCHED REQUESTS FAILED ***", failedCount);
+        LOG_ERROR("Failed to write output file: %s", e.what());
+        return EXIT_FAILURE;
     }
 
     if (profilerEnabled)
@@ -846,28 +1212,6 @@ int main(int argc, char* argv[])
         }
     }
 
-    // Export to JSON file
-    try
-    {
-        std::ofstream outputFile(args.outputFile);
-        if (outputFile.is_open())
-        {
-            outputFile << outputData.dump(4); // Pretty print with 4 spaces indentation
-            outputFile.close();
-            LOG_INFO("All responses exported to: %s", args.outputFile.c_str());
-        }
-        else
-        {
-            LOG_ERROR("Failed to open output file: %s", args.outputFile.c_str());
-            return EXIT_FAILURE;
-        }
-    }
-    catch (std::exception const& e)
-    {
-        LOG_ERROR("Failed to write output file: %s", e.what());
-        return EXIT_FAILURE;
-    }
-
-    // Return false if any request failed
-    return hasFailedRequest ? EXIT_FAILURE : EXIT_SUCCESS;
+    CUDA_CHECK(cudaStreamDestroy(stream));
+    return requestSuccess ? EXIT_SUCCESS : EXIT_FAILURE;
 }

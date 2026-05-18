@@ -8,6 +8,7 @@
 #include "common/checkMacros.h"
 #include "multimodal/imageUtils.h"
 #include <cstdlib>
+#include <cctype>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -20,6 +21,21 @@ namespace rt
 {
 namespace
 {
+bool openvlaDebugLogsEnabled()
+{
+    char const* env = std::getenv("OPENVLA_DEBUG_LOGS");
+    if (env == nullptr)
+    {
+        return false;
+    }
+    std::string value{env};
+    for (auto& c : value)
+    {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
 std::string buildOpenVLARawPrompt(rt::LLMGenerationRequest::Request const& req)
 {
     std::string prompt;
@@ -282,8 +298,12 @@ void OpenVLAViTRunner::textPreprocess(rt::LLMGenerationRequest const& request,
             ids = {1};
         }
 
-        LOG_INFO("OpenVLA raw text preprocess: batch=%zu applyChatTemplate=%d imageTokens=%ld promptIds(before)=%s",
-            i, request.applyChatTemplate ? 1 : 0, static_cast<long>(mConfig.outTokens), formatIdSlice(ids).c_str());
+        if (openvlaDebugLogsEnabled())
+        {
+            LOG_INFO("OpenVLA raw text preprocess: batch=%zu applyChatTemplate=%d imageTokens=%ld promptIds(before)=%s",
+                i, request.applyChatTemplate ? 1 : 0, static_cast<long>(mConfig.outTokens),
+                formatIdSlice(ids).c_str());
+        }
 
         // Match OpenFly/OpenVLA Python predict_action(): ensure trailing token 29871
         // so generation starts from the same prompt boundary used during training/inference.
@@ -336,7 +356,10 @@ void OpenVLAViTRunner::textPreprocess(rt::LLMGenerationRequest const& request,
             }
         }
 
-        LOG_INFO("OpenVLA raw text preprocess: promptIds(after)=%s", formatIdSlice(newIds).c_str());
+        if (openvlaDebugLogsEnabled())
+        {
+            LOG_INFO("OpenVLA raw text preprocess: promptIds(after)=%s", formatIdSlice(newIds).c_str());
+        }
         batchedInputIds.emplace_back(std::move(newIds));
     }
 }
@@ -389,19 +412,22 @@ bool OpenVLAViTRunner::infer(cudaStream_t stream) noexcept
         }
     }
 
-    std::ostringstream oss;
-    oss << "OpenVLA visual output head=[";
-    size_t const n = std::min<size_t>(8, hostOutput.size());
-    for (size_t i = 0; i < n; ++i)
+    if (openvlaDebugLogsEnabled())
     {
-        if (i != 0)
+        std::ostringstream oss;
+        oss << "OpenVLA visual output head=[";
+        size_t const n = std::min<size_t>(8, hostOutput.size());
+        for (size_t i = 0; i < n; ++i)
         {
-            oss << ", ";
+            if (i != 0)
+            {
+                oss << ", ";
+            }
+            oss << static_cast<float>(hostOutput[i]);
         }
-        oss << static_cast<float>(hostOutput[i]);
+        oss << "]";
+        LOG_INFO("%s", oss.str().c_str());
     }
-    oss << "]";
-    LOG_INFO("%s", oss.str().c_str());
     return true;
 }
 

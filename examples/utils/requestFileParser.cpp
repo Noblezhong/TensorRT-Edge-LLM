@@ -24,9 +24,12 @@
 #include "runtime/audioUtils.h"
 #include "runtime/imageUtils.h"
 
+#include <cctype>
+#include <array>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <cstring>
 
 namespace trt_edgellm
 {
@@ -35,11 +38,62 @@ namespace exampleUtils
 
 using Json = nlohmann::json;
 
+namespace
+{
+std::vector<unsigned char> decodeBase64(std::string const& input)
+{
+    static const std::array<int8_t, 256> kDecodeTable = []() {
+        std::array<int8_t, 256> table{};
+        table.fill(-1);
+        for (int i = 0; i < 26; ++i)
+        {
+            table[static_cast<unsigned char>('A' + i)] = static_cast<int8_t>(i);
+            table[static_cast<unsigned char>('a' + i)] = static_cast<int8_t>(26 + i);
+        }
+        for (int i = 0; i < 10; ++i)
+        {
+            table[static_cast<unsigned char>('0' + i)] = static_cast<int8_t>(52 + i);
+        }
+        table[static_cast<unsigned char>('+')] = 62;
+        table[static_cast<unsigned char>('/')] = 63;
+        return table;
+    }();
+
+    std::vector<unsigned char> output;
+    output.reserve(input.size() * 3 / 4);
+
+    int val = 0;
+    int valb = -8;
+    for (unsigned char c : input)
+    {
+        if (std::isspace(c))
+        {
+            continue;
+        }
+        if (c == '=')
+        {
+            break;
+        }
+        int8_t decoded = kDecodeTable[c];
+        if (decoded < 0)
+        {
+            throw std::runtime_error("Invalid base64 content in image payload");
+        }
+        val = (val << 6) + decoded;
+        valb += 6;
+        if (valb >= 0)
+        {
+            output.push_back(static_cast<unsigned char>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return output;
+}
+} // namespace
+
 std::pair<std::unordered_map<std::string, std::string>, std::vector<rt::LLMGenerationRequest>> parseRequestFile(
     std::filesystem::path const& inputFilePath, int32_t batchSizeOverride, int64_t maxGenerateLengthOverride)
 {
-    std::vector<rt::LLMGenerationRequest> batchedRequests;
-
     Json inputData;
     std::ifstream inputFileStream(inputFilePath);
     check::check(inputFileStream.is_open(), "Failed to open input file: " + inputFilePath.string());
@@ -53,6 +107,14 @@ std::pair<std::unordered_map<std::string, std::string>, std::vector<rt::LLMGener
         throw std::runtime_error(
             format::fmtstr("Failed to parse input file %s with error: %s", inputFilePath.string().c_str(), e.what()));
     }
+
+    return parseRequestJson(std::move(inputData), batchSizeOverride, maxGenerateLengthOverride);
+}
+
+std::pair<std::unordered_map<std::string, std::string>, std::vector<rt::LLMGenerationRequest>> parseRequestJson(
+    Json const& inputData, int32_t batchSizeOverride, int64_t maxGenerateLengthOverride)
+{
+    std::vector<rt::LLMGenerationRequest> batchedRequests;
 
     int batchSize = (batchSizeOverride != -1) ? batchSizeOverride : inputData.value("batch_size", 1);
     check::check(batchSize > 0, format::fmtstr("Invalid batch_size value: %d (must be positive)", batchSize));
@@ -211,11 +273,52 @@ std::pair<std::unordered_map<std::string, std::string>, std::vector<rt::LLMGener
                         }
                         else if (msgContent.type == "image")
                         {
-                            msgContent.content = contentItemJson["image"].get<std::string>();
-                            auto image = rt::imageUtils::loadImageFromFile(msgContent.content);
-                            if (image.buffer != nullptr)
+                            if (contentItemJson.contains("image"))
                             {
-                                imageBuffers.push_back(std::move(image));
+                                msgContent.content = contentItemJson["image"].get<std::string>();
+                                auto image = rt::imageUtils::loadImageFromFile(msgContent.content);
+                                if (image.buffer != nullptr)
+                                {
+                                    imageBuffers.push_back(std::move(image));
+                                }
+                            }
+                            else if (contentItemJson.contains("image_raw_base64"))
+                            {
+                                check::check(contentItemJson.contains("image_width") && contentItemJson.contains("image_height")
+                                        && contentItemJson.contains("image_channels"),
+                                    "Raw image payload must contain image_width/image_height/image_channels");
+                                int64_t const width = contentItemJson["image_width"].get<int64_t>();
+                                int64_t const height = contentItemJson["image_height"].get<int64_t>();
+                                int64_t const channels = contentItemJson["image_channels"].get<int64_t>();
+                                check::check(width > 0 && height > 0 && channels == 3,
+                                    "Raw image payload must be RGB with positive width/height");
+                                std::string const& imageBase64 = contentItemJson["image_raw_base64"].get<std::string>();
+                                auto imageBytes = decodeBase64(imageBase64);
+                                size_t const expectedSize = static_cast<size_t>(width * height * channels);
+                                check::check(imageBytes.size() == expectedSize,
+                                    format::fmtstr("Raw image payload size mismatch: got %zu, expected %zu",
+                                        imageBytes.size(), expectedSize));
+                                rt::Tensor imgTensor({height, width, channels}, rt::DeviceType::kCPU,
+                                    nvinfer1::DataType::kUINT8, "requestFileParser::rawImageTensor");
+                                std::memcpy(imgTensor.dataPointer<unsigned char>(), imageBytes.data(), expectedSize);
+                                imageBuffers.emplace_back(std::move(imgTensor));
+                                msgContent.content = contentItemJson.value("image_name", "raw_rgb_image");
+                            }
+                            else if (contentItemJson.contains("image_base64"))
+                            {
+                                std::string const& imageBase64 = contentItemJson["image_base64"].get<std::string>();
+                                msgContent.content = contentItemJson.value("image_name", "socket_image");
+                                auto imageBytes = decodeBase64(imageBase64);
+                                auto image = rt::imageUtils::loadImageFromMemory(imageBytes.data(), imageBytes.size());
+                                if (image.buffer != nullptr)
+                                {
+                                    imageBuffers.push_back(std::move(image));
+                                }
+                            }
+                            else
+                            {
+                                throw std::runtime_error(
+                                    "Image content must contain either 'image' path or 'image_base64' payload");
                             }
                         }
                         else if (msgContent.type == "audio")
