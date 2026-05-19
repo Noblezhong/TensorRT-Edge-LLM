@@ -112,9 +112,17 @@ from .onnx_export.llm_export import export_draft_model, export_llm_model
 from .onnx_export.lora import (insert_lora_and_save,
                                process_lora_weights_and_save)
 from .onnx_export.visual_export import visual_export
-from .quantization.llm_quantization import (quantize_and_save_draft,
-                                            quantize_and_save_llm)
 from .vocab_reduction.vocab_reduction import reduce_vocab_size
+
+try:
+    from .quantization.llm_quantization import (quantize_and_save_draft,
+                                                quantize_and_save_llm)
+except ImportError:
+    # Quantization helpers depend on optional NVIDIA ModelOpt packages.
+    # Keep the package importable for export-only workflows when those extras
+    # are not installed.
+    quantize_and_save_draft = None
+    quantize_and_save_llm = None
 
 try:
     from .version import __version__
