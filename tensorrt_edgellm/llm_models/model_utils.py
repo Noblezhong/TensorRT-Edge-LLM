@@ -817,9 +817,19 @@ def load_hf_model(
         except Exception:
             pass
 
-        model = AutoModelForVision2Seq.from_pretrained(
-            model_dir, torch_dtype=torch_dtype,
-            trust_remote_code=True).to(device)
+        try:
+            model = AutoModelForVision2Seq.from_pretrained(
+                model_dir, torch_dtype=torch_dtype,
+                trust_remote_code=True).to(device)
+        except Exception as e_v2s:
+            print(f"AutoModelForVision2Seq failed: {e_v2s}")
+            config = OpenFlyConfig.from_pretrained(model_dir,
+                                                   trust_remote_code=True)
+            model = OpenVLAForActionPrediction.from_pretrained(
+                model_dir,
+                config=config,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True).to(device)
     elif _is_gptq_omni_model(model_dir):
         # GPTQ Omni: optimum cannot handle nested thinker/talker block structure,
         # so we load via GPTQModel.load() with explicit layers_node_user paths.
