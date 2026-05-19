@@ -266,12 +266,6 @@ std::unique_ptr<nvinfer1::IBuilderConfig> createBuilderConfig(nvinfer1::IBuilder
     config->setFlag(nvinfer1::BuilderFlag::kMONITOR_MEMORY);
 #endif
 
-    // Jetson-class devices are much more sensitive to TensorRT builder peak memory
-    // than x86 hosts. Cap workspace so the optimizer does not grab an unbounded
-    // amount of RAM/DRAM during tactic selection and graph reduction.
-    config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 1ULL << 30);
-    LOG_INFO("TensorRT builder workspace limit set to 1 GiB");
-
     return config;
 }
 
