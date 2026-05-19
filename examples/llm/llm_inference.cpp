@@ -54,6 +54,21 @@ using Json = nlohmann::json;
 
 namespace
 {
+bool disableCudaGraphCapture()
+{
+    char const* env = std::getenv("OPENFLY_DISABLE_CUDA_GRAPH");
+    if (env == nullptr)
+    {
+        return false;
+    }
+    std::string value{env};
+    for (auto& c : value)
+    {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
 struct OpenFlyActionDecodeConfig
 {
     bool enabled{false};
@@ -999,7 +1014,11 @@ int main(int argc, char* argv[])
         }
     }
 
-    if (!runtime->captureDecodingCUDAGraph(stream))
+    if (disableCudaGraphCapture())
+    {
+        LOG_INFO("CUDA graph capture disabled by OPENFLY_DISABLE_CUDA_GRAPH.");
+    }
+    else if (!runtime->captureDecodingCUDAGraph(stream))
     {
         LOG_WARNING("Failed to capture CUDA graph for decoding, proceeding with normal engine execution.");
     }

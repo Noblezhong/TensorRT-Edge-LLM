@@ -25,8 +25,6 @@ The module contains:
 - register_gather_nd_onnx_symbolic_functions: Function to register the custom operation with ONNX
 """
 
-from __future__ import annotations
-
 import torch
 from torch.onnx import symbolic_helper
 from typing import Any

@@ -32,6 +32,7 @@ The graph output is flattened projected embeddings with shape
 
 from __future__ import annotations
 
+import types
 import logging
 from functools import partial
 from typing import Any, Callable, List, Optional, Tuple
@@ -61,6 +62,44 @@ def ls_apply_patch(ls_module: LayerScale):
     ls_module.scale_factor = nn.Parameter(ls_module.gamma.clone())
     ls_module.forward = _ls_new_forward.__get__(ls_module, LayerScale)
     del ls_module.gamma
+
+
+def _manual_timm_attention_forward(self, x: torch.Tensor) -> torch.Tensor:
+    """Decompose timm SDPA into primitive ops for ONNX/TRT export.
+
+    timm VisionTransformer attention defaults to
+    ``torch.nn.functional.scaled_dot_product_attention``.  Dynamo export
+    lowers that into an ONNX ``Attention`` op, which this TRT build does not
+    have a matching plugin for in the OpenVLA visual graph.  Using the same
+    math explicitly keeps the graph in primitive matmul/softmax form.
+    """
+    batch_size, seq_len, hidden_size = x.shape
+    qkv = self.qkv(x).reshape(batch_size, seq_len, 3, self.num_heads,
+                              self.head_dim).permute(2, 0, 3, 1, 4)
+    q, k, v = qkv.unbind(0)
+
+    if hasattr(self, "q_norm") and self.q_norm is not None:
+        q = self.q_norm(q)
+    if hasattr(self, "k_norm") and self.k_norm is not None:
+        k = self.k_norm(k)
+
+    scale = getattr(self, "scale", self.head_dim**-0.5)
+    scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+    attn_weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(q.dtype)
+    out = torch.matmul(attn_weights, v)
+    out = out.transpose(1, 2).reshape(batch_size, seq_len, hidden_size)
+    out = self.proj(out)
+    if hasattr(self, "proj_drop") and self.proj_drop is not None:
+        out = self.proj_drop(out)
+    return out
+
+
+def _patch_timm_attention_modules(module: nn.Module) -> None:
+    for child in module.modules():
+        if child.__class__.__module__.startswith("timm.models.vision_transformer") and hasattr(
+                child, "qkv") and hasattr(child, "proj"):
+            child.forward = types.MethodType(_manual_timm_attention_forward,
+                                             child)
 
 
 class PrismaticVisionBackbone(nn.Module):
@@ -253,6 +292,7 @@ class OpenVLAVisualModel(nn.Module):
             timm_model_ids,
             timm_override_act_layers,
         )
+        _patch_timm_attention_modules(self.vision_backbone)
         self.projector = PrismaticProjector(
             self.use_fused_vision_backbone,
             vision_dim=self.vision_backbone.embed_dim,

@@ -329,7 +329,15 @@ def quantize_and_export(
     if is_quantized(model):
         print("Model already quantized — skipping.")
     else:
-        quant_cfg = build_quant_config(quantization, lm_head_quantization,
+        effective_lm_head_quantization = lm_head_quantization
+        if _is_openvla_checkpoint(model_dir) and lm_head_quantization is not None:
+            print(
+                "[WARN] OpenVLA exports keep lm_head in FP16 for TRT engine "
+                "compatibility; ignoring --lm_head_quantization.")
+            effective_lm_head_quantization = None
+
+        quant_cfg = build_quant_config(quantization,
+                                       effective_lm_head_quantization,
                                        kv_cache_quantization)
         batch_size = 16 if quantization in (None, "int4_awq") else 1
         if _is_openvla_checkpoint(model_dir):
