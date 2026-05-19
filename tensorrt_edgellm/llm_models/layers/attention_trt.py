@@ -26,6 +26,8 @@ Key differences from plugin-based attention:
 - Limited to vanilla decoding (no tree attention or reusable KV cache in v1)
 """
 
+from __future__ import annotations
+
 from typing import Optional, Tuple
 
 import torch

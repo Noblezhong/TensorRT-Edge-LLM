@@ -26,6 +26,8 @@ The module contains:
 - ONNX export utilities for the custom operation
 """
 
+from __future__ import annotations
+
 import math
 from typing import Optional, Tuple
 
