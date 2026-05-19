@@ -33,9 +33,15 @@ import torch.nn as nn
 from safetensors.torch import safe_open
 from transformers import (AutoConfig, AutoModelForCausalLM,
                           AutoModelForImageTextToText, AutoProcessor,
-                          AutoTokenizer, PretrainedConfig, PreTrainedModel,
-                          Qwen2VLImageProcessorFast, Qwen3VLProcessor,
-                          Qwen3VLVideoProcessor)
+                          AutoTokenizer, PretrainedConfig, PreTrainedModel)
+
+try:
+    from transformers import (Qwen2VLImageProcessorFast, Qwen3VLProcessor,
+                              Qwen3VLVideoProcessor)
+except ImportError:
+    Qwen2VLImageProcessorFast = None
+    Qwen3VLProcessor = None
+    Qwen3VLVideoProcessor = None
 
 from .models.eagle3_draft import Eagle3DraftModel
 
@@ -866,6 +872,10 @@ def load_hf_model(
     # Try to load processor if available
     processor = None
     if _is_alpamayo_1_model(model_dir):
+        if Qwen3VLVideoProcessor is None or Qwen2VLImageProcessorFast is None or Qwen3VLProcessor is None:
+            raise ImportError(
+                "This transformers version does not provide the Qwen2/Qwen3 VL processors required for Alpamayo-1 export."
+            )
         preprocessor_config = {
             "size": {
                 "longest_edge": 16777216,
