@@ -1233,6 +1233,28 @@ def resolve_output_embeddings(hf_model: nn.Module,
     if output_layer is not None:
         return output_layer
 
+    wrapped_language_model = getattr(hf_model, "language_model", None)
+    if wrapped_language_model is not None:
+        output_layer = getattr(wrapped_language_model, "lm_head", None)
+        if output_layer is not None:
+            return output_layer
+
+        if hasattr(wrapped_language_model, "get_output_embeddings"):
+            output_layer = wrapped_language_model.get_output_embeddings()
+            if output_layer is not None:
+                return output_layer
+
+    wrapped_model = getattr(hf_model, "model", None)
+    if wrapped_model is not None:
+        output_layer = getattr(wrapped_model, "lm_head", None)
+        if output_layer is not None:
+            return output_layer
+
+        if hasattr(wrapped_model, "get_output_embeddings"):
+            output_layer = wrapped_model.get_output_embeddings()
+            if output_layer is not None:
+                return output_layer
+
     output_layer = getattr(language_model, "lm_head", None)
     if output_layer is not None:
         return output_layer
@@ -1264,10 +1286,14 @@ def prepare_language_model_and_config(hf_model: nn.Module):
     # Use language_model if available, otherwise use model.model.
     if hasattr(hf_model, 'language_model'):
         language_model = hf_model.language_model
+        if hasattr(language_model, "get_decoder"):
+            language_model = language_model.get_decoder()
         config = hf_model.config.text_config
     elif hasattr(hf_model, 'model') and hasattr(hf_model.model,
                                                 'language_model'):
         language_model = hf_model.model.language_model
+        if hasattr(language_model, "get_decoder"):
+            language_model = language_model.get_decoder()
         config = hf_model.config.text_config
     elif hasattr(hf_model.config, 'text_config') and hasattr(
             hf_model.config, 'audio_config'):
