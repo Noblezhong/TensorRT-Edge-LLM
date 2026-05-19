@@ -19,4 +19,4 @@ This module contains common definitions for TensorRT Edge-LLM.
 """
 
 # ONNX opset version for all exports
-ONNX_OPSET_VERSION = 23
+ONNX_OPSET_VERSION = 20
