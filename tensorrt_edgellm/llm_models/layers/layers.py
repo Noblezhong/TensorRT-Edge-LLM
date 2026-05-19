@@ -545,7 +545,8 @@ class EdgeLLMDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.post_attention_layernorm(hidden_states)
             hidden_states = self.mlp(hidden_states)
-            if isinstance(self.mlp, Qwen3MoeSparseMoeBlock):
+            if Qwen3MoeSparseMoeBlock is not None and isinstance(
+                    self.mlp, Qwen3MoeSparseMoeBlock):
                 hidden_states = hidden_states[0]
             hidden_states = residual + hidden_states
 
