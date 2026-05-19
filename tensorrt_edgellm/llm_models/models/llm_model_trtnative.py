@@ -27,11 +27,15 @@ The module contains:
 import os
 from typing import Dict, List, Optional, Tuple, Union
 
-import modelopt.torch.opt as mto
 import torch
 from torch import nn
 from transformers.models.llama.modeling_llama import (LlamaRMSNorm,
                                                       LlamaRotaryEmbedding)
+
+try:
+    import modelopt.torch.opt as mto
+except ImportError:
+    mto = None
 
 from .. import model_utils
 from ..layers.gather_nd import custom_gather_nd
@@ -598,6 +602,10 @@ class Eagle3DraftModelTRTNative(nn.Module):
         quantized_model_path = os.path.join(draft_model_dir,
                                             "modelopt_quantized_model.pth")
         if os.path.exists(quantized_model_path):
+            if mto is None:
+                raise ImportError(
+                    "nvidia-modelopt is required to restore quantized TRT-native models."
+                )
             mto.restore(model, quantized_model_path)
             return model
 

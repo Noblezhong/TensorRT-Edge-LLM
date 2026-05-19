@@ -30,7 +30,6 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from modelopt.torch.quantization.utils import is_quantized_linear
 from safetensors.torch import safe_open
 from transformers import (AutoConfig, AutoModelForCausalLM,
                           AutoModelForImageTextToText, AutoProcessor,
@@ -39,6 +38,12 @@ from transformers import (AutoConfig, AutoModelForCausalLM,
                           Qwen3VLVideoProcessor)
 
 from .models.eagle3_draft import Eagle3DraftModel
+
+try:
+    from modelopt.torch.quantization.utils import is_quantized_linear
+except ImportError:
+    def is_quantized_linear(module: nn.Module) -> bool:
+        return False
 
 
 def is_nvfp4_linear(module: nn.Module) -> bool:

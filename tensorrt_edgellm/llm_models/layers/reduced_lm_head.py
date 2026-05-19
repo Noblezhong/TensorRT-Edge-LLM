@@ -20,9 +20,16 @@ a language model head by selecting a subset of tokens based on a vocabulary map.
 """
 
 import torch
-from modelopt.torch.quantization.nn import QuantLinear
-from modelopt.torch.quantization.utils import is_quantized_linear
 from torch import nn
+
+try:
+    from modelopt.torch.quantization.nn import QuantLinear
+    from modelopt.torch.quantization.utils import is_quantized_linear
+except ImportError:
+    QuantLinear = None
+
+    def is_quantized_linear(module: nn.Linear) -> bool:
+        return False
 
 
 def reduce_lm_head(lm_head: nn.Linear, reduced_vocab_size: int,
@@ -66,7 +73,7 @@ def reduce_lm_head(lm_head: nn.Linear, reduced_vocab_size: int,
         vocab_map]  # shape: (reduced_vocab_size, hidden_size)
 
     # Create new Linear layer with reduced output features (no bias for LM heads)
-    if is_quantized_linear(lm_head):
+    if QuantLinear is not None and is_quantized_linear(lm_head):
         # For QuantLinear, we need to:
         # 1. Create a new QuantLinear with the reduced dimensions
         # 2. Copy the reduced weight

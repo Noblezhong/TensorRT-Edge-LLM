@@ -20,13 +20,20 @@ This module provides core quantization functionality using NVIDIA ModelOpt.
 
 from typing import Any, Dict
 
-import modelopt.torch.quantization as mtq
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+try:
+    import modelopt.torch.quantization as mtq
+except ImportError:
+    mtq = None
+
 
 def enable_huggingface_checkpointing_patch() -> None:
+    if mtq is None:
+        return
+
     from modelopt.torch.opt.plugins.huggingface import (
         _LIBRARY_CLASSES_FOR_PATCHING, _PATCHED_CLASSES,
         patch_pretrained_methods)
@@ -100,6 +107,10 @@ def quantize_model(
                 model(data, **kwargs)
 
     # Get quantization config and perform quantization
+    if mtq is None:
+        raise ImportError(
+            "nvidia-modelopt is required for quantize_model().")
+
     mtq.quantize(model, quant_config, forward_loop=calibrate_loop)
     mtq.print_quant_summary(model)
     return model
@@ -159,6 +170,10 @@ def quantize_draft_model(
                                       hidden_states_from_draft)
 
     # Get quantization config and perform quantization
+    if mtq is None:
+        raise ImportError(
+            "nvidia-modelopt is required for quantize_draft_model().")
+
     mtq.quantize(draft_model, quant_config, forward_loop=calibrate_loop)
     mtq.print_quant_summary(draft_model)
     return draft_model
