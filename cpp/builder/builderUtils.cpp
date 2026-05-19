@@ -273,11 +273,17 @@ std::unique_ptr<nvinfer1::IBuilderConfig> createBuilderConfig(nvinfer1::IBuilder
     config->setAvgTimingIterations(1);
     config->setBuilderOptimizationLevel(0);
     config->setMaxAuxStreams(0);
+    auto const tacticSources = (1U << static_cast<uint32_t>(nvinfer1::TacticSource::kCUBLAS))
+        | (1U << static_cast<uint32_t>(nvinfer1::TacticSource::kCUBLAS_LT));
+    if (!config->setTacticSources(static_cast<nvinfer1::TacticSources>(tacticSources)))
+    {
+        LOG_WARNING("Failed to restrict TensorRT tactic sources to cuBLAS/cuBLASLt");
+    }
 #if (NV_TENSORRT_MAJOR >= 10 && NV_TENSORRT_MINOR >= 6) || NV_TENSORRT_MAJOR >= 11
     // Cap the workspace pool to keep Jetson from ballooning during tactic selection.
     config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE, 4ULL << 30);
 #endif
-    LOG_INFO("Jetson/aarch64 build mode: builder max threads=1, avg timing=1, optimization level=0, max aux streams=0");
+    LOG_INFO("Jetson/aarch64 build mode: builder max threads=1, avg timing=1, optimization level=0, max aux streams=0, tactic sources=cuBLAS+cuBLASLt");
 #endif
 
 #if (NV_TENSORRT_MAJOR >= 10 && NV_TENSORRT_MINOR >= 6) || NV_TENSORRT_MAJOR >= 11
