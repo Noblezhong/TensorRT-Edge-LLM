@@ -529,8 +529,11 @@ def is_hybrid_model_type(model_type: str) -> bool:
 
 def _is_qwen3_omni_model(model_dir: str) -> bool:
     """Check if the model is a Qwen3 Omni model by checking config.json for model_type."""
-    cfg = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
-    return getattr(cfg, "model_type", None) == "qwen3_omni"
+    try:
+        cfg = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+        return getattr(cfg, "model_type", None) == "qwen3_omni"
+    except Exception:
+        return False
 
 
 def _read_model_type(model_dir: str) -> str:
