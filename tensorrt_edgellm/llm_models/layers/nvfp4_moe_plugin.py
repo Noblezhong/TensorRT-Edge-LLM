@@ -56,6 +56,7 @@ import onnx
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Any
 from onnx.defs import OpSchema
 from torch.onnx import register_custom_op_symbolic, symbolic_helper
 from torch.onnx.symbolic_helper import _get_tensor_sizes
@@ -305,7 +306,7 @@ onnx.defs.register_schema(nvfp4_moe_plugin_schema)
     "i",
 )
 def symbolic_nvfp4_moe_plugin(
-    g: torch.onnx._internal.torchscript_exporter.jit_utils.GraphContext,
+    g: Any,
     router_logits: torch._C.Value,
     hidden_states: torch._C.Value,
     hidden_global_scale: torch._C.Value,

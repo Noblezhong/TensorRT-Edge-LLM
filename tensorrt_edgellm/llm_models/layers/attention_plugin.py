@@ -26,7 +26,7 @@ The module contains:
 
 from __future__ import annotations
 
-from typing import Optional, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 import onnx
 import torch
@@ -239,7 +239,7 @@ onnx.defs.register_schema(vit_attention_plugin_schema)
 @symbolic_helper.parse_args("v", "v", "v", "v", "v", "v", "v", "i", "i", "b",
                             "i", "b", "i", "v", "v", "none")
 def symbolic_attention_plugin(
-    g: torch.onnx._internal.torchscript_exporter.jit_utils.GraphContext,
+    g: Any,
     q: torch._C.Value,
     k: torch._C.Value,
     v: torch._C.Value,
@@ -318,7 +318,7 @@ def symbolic_attention_plugin(
 
 @symbolic_helper.parse_args("v", "v", "v", "v", "v", "i", "i")
 def symbolic_vit_attention_plugin(
-    g: torch.onnx._internal.torchscript_exporter.jit_utils.GraphContext,
+    g: Any,
     q: torch._C.Value,
     k: torch._C.Value,
     v: torch._C.Value,
