@@ -22,8 +22,12 @@ from transformers.models.llama.modeling_llama import (LlamaAttention, LlamaMLP,
                                                       apply_rotary_pos_emb,
                                                       repeat_kv)
 from transformers.models.qwen2.modeling_qwen2 import Qwen2Attention, Qwen2MLP
-from transformers.models.qwen3_moe.modeling_qwen3_moe import \
-    Qwen3MoeSparseMoeBlock
+
+try:
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import \
+        Qwen3MoeSparseMoeBlock
+except ImportError:
+    Qwen3MoeSparseMoeBlock = None
 
 from tensorrt_edgellm.quantization import FP8_E4M3_MAX
 

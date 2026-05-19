@@ -24,8 +24,12 @@ import torch.nn as nn
 from onnx.defs import OpSchema
 from torch.onnx import register_custom_op_symbolic, symbolic_helper
 from torch.onnx.symbolic_helper import _get_tensor_sizes
-from transformers.models.qwen3_moe.modeling_qwen3_moe import \
-    Qwen3MoeSparseMoeBlock
+
+try:
+    from transformers.models.qwen3_moe.modeling_qwen3_moe import \
+        Qwen3MoeSparseMoeBlock
+except ImportError:
+    Qwen3MoeSparseMoeBlock = None
 
 from ...common import ONNX_OPSET_VERSION
 from .int4_gemm_plugin import unpack_int4_weights_gptq
