@@ -20,7 +20,11 @@ for deployment on edge devices.
 """
 
 from .llm_export import export_draft_model, export_llm_model
-from .visual_export import visual_export
+
+try:
+    from .visual_export import visual_export
+except ImportError:
+    visual_export = None
 
 __all__ = [
     "export_draft_model",

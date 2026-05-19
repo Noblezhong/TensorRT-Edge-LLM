@@ -106,13 +106,29 @@ Example Usage:
         )
 """
 
-from .onnx_export.action_export import action_export
-from .onnx_export.audio_export import audio_export
+try:
+    from .onnx_export.action_export import action_export
+except ImportError:
+    action_export = None
+
+try:
+    from .onnx_export.audio_export import audio_export
+except ImportError:
+    audio_export = None
+
 from .onnx_export.llm_export import export_draft_model, export_llm_model
 from .onnx_export.lora import (insert_lora_and_save,
                                process_lora_weights_and_save)
-from .onnx_export.visual_export import visual_export
-from .vocab_reduction.vocab_reduction import reduce_vocab_size
+
+try:
+    from .onnx_export.visual_export import visual_export
+except ImportError:
+    visual_export = None
+
+try:
+    from .vocab_reduction.vocab_reduction import reduce_vocab_size
+except ImportError:
+    reduce_vocab_size = None
 
 try:
     from .quantization.llm_quantization import (quantize_and_save_draft,
