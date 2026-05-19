@@ -1190,6 +1190,37 @@ def load_reduced_vocab_map(reduced_vocab_dir: str,
     return reduced_vocab_size, vocab_map
 
 
+def resolve_input_embeddings(language_model: nn.Module) -> nn.Module:
+    """
+    Resolve the token embedding module for a Hugging Face language model.
+
+    Different wrappers expose embeddings differently. Prefer the explicit
+    embedding module if present, otherwise fall back to the HF accessor.
+    """
+    embed_layer = getattr(language_model, "embed_tokens", None)
+    if embed_layer is not None:
+        return embed_layer
+
+    embed_layer = getattr(language_model, "embeddings", None)
+    if embed_layer is not None:
+        return embed_layer
+
+    if hasattr(language_model, "get_input_embeddings"):
+        embed_layer = language_model.get_input_embeddings()
+        if embed_layer is not None:
+            return embed_layer
+
+    inner_model = getattr(language_model, "model", None)
+    if inner_model is not None:
+        embed_layer = getattr(inner_model, "embed_tokens", None)
+        if embed_layer is not None:
+            return embed_layer
+
+    raise AttributeError(
+        f"Could not resolve token embeddings for model type {type(language_model).__name__}"
+    )
+
+
 def prepare_language_model_and_config(hf_model: nn.Module):
     """
     Prepare the language model and config from the HuggingFace model.

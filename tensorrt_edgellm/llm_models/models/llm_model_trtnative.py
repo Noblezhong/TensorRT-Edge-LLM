@@ -80,7 +80,8 @@ class EdgeLLMModelTRTNative(nn.Module):
             self.lm_head = reduce_lm_head(hf_model.lm_head, reduced_vocab_size,
                                           vocab_map)
 
-        self.embed_tokens = language_model.embed_tokens.to(self.torch_dtype)
+        self.embed_tokens = model_utils.resolve_input_embeddings(
+            language_model).to(self.torch_dtype)
         self.norm = language_model.norm.to(self.torch_dtype)
 
         # Replace decoder layers with our custom ones

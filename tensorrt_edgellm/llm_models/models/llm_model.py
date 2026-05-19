@@ -56,9 +56,8 @@ class BaseEdgeLLMCausalLMWrapper(nn.Module):
         self.torch_dtype = hf_model.dtype
         self.config = config
 
-        # Some models use `embed_tokens`, others use `embeddings`.
-        embed_layer = getattr(language_model, 'embed_tokens',
-                              None) or language_model.embeddings
+        # Some wrappers expose `embed_tokens`, some only expose `get_input_embeddings()`.
+        embed_layer = model_utils.resolve_input_embeddings(language_model)
         self.embed_tokens = embed_layer.to(self.torch_dtype)
 
         if reduced_vocab_size is not None and vocab_map is not None:
