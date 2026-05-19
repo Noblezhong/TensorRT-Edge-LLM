@@ -33,7 +33,8 @@ import torch.nn as nn
 from safetensors.torch import safe_open
 from transformers import (AutoConfig, AutoModelForCausalLM,
                           AutoModelForImageTextToText, AutoProcessor,
-                          AutoTokenizer, PretrainedConfig, PreTrainedModel)
+                          AutoModelForVision2Seq, AutoTokenizer,
+                          PretrainedConfig, PreTrainedModel)
 
 try:
     from transformers import (Qwen2VLImageProcessorFast, Qwen3VLProcessor,
@@ -552,6 +553,11 @@ def _read_model_type(model_dir: str) -> str:
     return ""
 
 
+def _is_openvla_model(model_dir: str) -> bool:
+    """Check if the model is an OpenVLA/OpenFly checkpoint."""
+    return _read_model_type(model_dir) == "openvla"
+
+
 def _is_qwen3_tts_model(model_dir: str) -> bool:
     """Qwen3-TTS is not integrated into transformers yet."""
     return _read_model_type(
@@ -797,6 +803,23 @@ def load_hf_model(
             model_dir,
             torch_dtype=torch_dtype)
         model = model.to(device)
+    elif _is_openvla_model(model_dir):
+        from extern.hf.configuration_prismatic import OpenFlyConfig
+        from extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+
+        try:
+            AutoConfig.register("openvla", OpenFlyConfig)
+        except Exception:
+            pass
+        try:
+            AutoModelForVision2Seq.register(OpenFlyConfig,
+                                            OpenVLAForActionPrediction)
+        except Exception:
+            pass
+
+        model = AutoModelForVision2Seq.from_pretrained(
+            model_dir, torch_dtype=torch_dtype,
+            trust_remote_code=True).to(device)
     elif _is_gptq_omni_model(model_dir):
         # GPTQ Omni: optimum cannot handle nested thinker/talker block structure,
         # so we load via GPTQModel.load() with explicit layers_node_user paths.
