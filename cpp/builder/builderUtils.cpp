@@ -262,6 +262,18 @@ std::unique_ptr<nvinfer1::IBuilderConfig> createBuilderConfig(nvinfer1::IBuilder
         return nullptr;
     }
 
+#if defined(__aarch64__)
+    // Jetson-class devices have a much tighter unified-memory budget than x86 hosts.
+    // Keep the builder single-threaded and prefer a lower optimization level so TensorRT
+    // does less tactic search and dynamic kernel compilation during engine build.
+    if (!builder->setMaxThreads(1))
+    {
+        LOG_WARNING("Failed to set TensorRT builder max threads to 1");
+    }
+    config->setBuilderOptimizationLevel(1);
+    LOG_INFO("Jetson/aarch64 build mode: builder max threads=1, optimization level=1");
+#endif
+
 #if (NV_TENSORRT_MAJOR >= 10 && NV_TENSORRT_MINOR >= 6) || NV_TENSORRT_MAJOR >= 11
     config->setFlag(nvinfer1::BuilderFlag::kMONITOR_MEMORY);
 #endif
