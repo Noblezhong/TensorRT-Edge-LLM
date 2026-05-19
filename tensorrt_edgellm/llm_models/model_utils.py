@@ -1221,6 +1221,32 @@ def resolve_input_embeddings(language_model: nn.Module) -> nn.Module:
     )
 
 
+def resolve_output_embeddings(hf_model: nn.Module,
+                              language_model: nn.Module) -> nn.Module:
+    """
+    Resolve the language-model output head for a Hugging Face model.
+
+    OpenVLA wraps a CausalLM inside a higher-level module, so the LM head may
+    live on the inner language model rather than the top-level wrapper.
+    """
+    output_layer = getattr(hf_model, "lm_head", None)
+    if output_layer is not None:
+        return output_layer
+
+    output_layer = getattr(language_model, "lm_head", None)
+    if output_layer is not None:
+        return output_layer
+
+    if hasattr(language_model, "get_output_embeddings"):
+        output_layer = language_model.get_output_embeddings()
+        if output_layer is not None:
+            return output_layer
+
+    raise AttributeError(
+        f"Could not resolve lm_head for model type {type(hf_model).__name__}"
+    )
+
+
 def prepare_language_model_and_config(hf_model: nn.Module):
     """
     Prepare the language model and config from the HuggingFace model.

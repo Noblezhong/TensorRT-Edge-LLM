@@ -62,16 +62,19 @@ class BaseEdgeLLMCausalLMWrapper(nn.Module):
 
         if reduced_vocab_size is not None and vocab_map is not None:
             print(
-                f"Reducing vocabulary size from {hf_model.lm_head.out_features}"
+                f"Reducing vocabulary size from "
+                f"{model_utils.resolve_output_embeddings(hf_model, language_model).out_features}"
                 f" to {reduced_vocab_size}")
             if vocab_map.shape[0] != reduced_vocab_size:
                 raise ValueError(
                     f"vocab_map size {vocab_map.shape[0]} does not match "
                     f"reduced_vocab_size {reduced_vocab_size}")
-            self.lm_head = reduce_lm_head(hf_model.lm_head, reduced_vocab_size,
-                                          vocab_map)
+            self.lm_head = reduce_lm_head(
+                model_utils.resolve_output_embeddings(hf_model, language_model),
+                reduced_vocab_size, vocab_map)
         else:
-            self.lm_head = hf_model.lm_head
+            self.lm_head = model_utils.resolve_output_embeddings(
+                hf_model, language_model)
 
     @property
     def device(self):

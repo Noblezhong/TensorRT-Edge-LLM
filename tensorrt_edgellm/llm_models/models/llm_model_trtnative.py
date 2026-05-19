@@ -75,9 +75,10 @@ class EdgeLLMModelTRTNative(nn.Module):
         self.is_eagle_base = is_eagle_base
 
         # Handle lm_head with optional vocabulary reduction
-        self.lm_head = hf_model.lm_head
+        self.lm_head = model_utils.resolve_output_embeddings(
+            hf_model, language_model)
         if reduced_vocab_size is not None and vocab_map is not None:
-            self.lm_head = reduce_lm_head(hf_model.lm_head, reduced_vocab_size,
+            self.lm_head = reduce_lm_head(self.lm_head, reduced_vocab_size,
                                           vocab_map)
 
         self.embed_tokens = model_utils.resolve_input_embeddings(
