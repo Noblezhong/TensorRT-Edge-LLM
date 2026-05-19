@@ -23,7 +23,12 @@ This module provides functions for quantizing LLM and visual models using NVIDIA
 # NOTE: This constant must be defined BEFORE any imports to avoid circular import issues.
 FP8_E4M3_MAX: float = 448.0
 
-from .llm_quantization import quantize_and_save_draft, quantize_and_save_llm
+try:
+    from .llm_quantization import quantize_and_save_draft, quantize_and_save_llm
+except ImportError:
+    # ModelOpt is optional for export-only / vocab-reduction workflows.
+    quantize_and_save_draft = None
+    quantize_and_save_llm = None
 
 __all__ = [
     "quantize_and_save_llm",
