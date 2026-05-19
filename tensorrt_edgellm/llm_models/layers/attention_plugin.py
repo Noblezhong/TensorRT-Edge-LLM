@@ -362,7 +362,7 @@ def attention_plugin(
     attention_mask: Optional[torch.Tensor] = None,
     position_ids: Optional[torch.Tensor] = None,
     qkv_scales: Optional[Sequence[float]] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Dummy TensorRT operation for attention computation, this is not used in the actual inference.
 

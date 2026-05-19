@@ -209,7 +209,7 @@ class EdgeLLMAttentionTRTNative(nn.Module):
         kvcache_start_index: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass for TensorRT native operations attention computation.
         

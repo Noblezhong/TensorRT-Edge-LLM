@@ -302,7 +302,7 @@ def _assert_identity_g_idx(proj: nn.Module, group_size: int) -> None:
 
 
 def _extract_gptq_proj_for_marlin(
-    proj: nn.Module, ) -> Tuple[torch.Tensor, torch.Tensor]:
+    proj: nn.Module, ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Extract (weights [N,K], scales [N, num_groups]) from a GPTQ quant linear for Marlin.
     Marlin uses zero_point=8; GPTQ uses qzeros. We remap: q_marlin = clamp(q_gptq - zero + 8, 0, 15)
@@ -351,7 +351,7 @@ def _marlin_permute_scales(s, size_k, size_n, group_size):
 def pack_int4_awq_marlin(
         weights_q: torch.Tensor,
         scales: torch.Tensor,
-        group_size: int = 128) -> Tuple[torch.Tensor, torch.Tensor]:
+        group_size: int = 128) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Pack INT4 weights (stored as int16) and scales into AWQ Marlin format.
     

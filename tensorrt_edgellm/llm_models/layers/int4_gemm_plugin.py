@@ -276,7 +276,7 @@ def pack_intweights(unpacked_qweight: np.ndarray) -> np.ndarray:
 
 def gather_rows_by_gidx_order(
         weight: torch.Tensor, g_idx: torch.Tensor,
-        group_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        group_size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Gather rows corresponding to positions where g_idx equals 0,1,...,group_size-1 in sequence.
     
