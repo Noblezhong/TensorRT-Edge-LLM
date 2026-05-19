@@ -306,7 +306,7 @@ onnx.defs.register_schema(nvfp4_moe_plugin_schema)
     "i",
 )
 def symbolic_nvfp4_moe_plugin(
-    g: Any,
+    g: object,
     router_logits: torch._C.Value,
     hidden_states: torch._C.Value,
     hidden_global_scale: torch._C.Value,

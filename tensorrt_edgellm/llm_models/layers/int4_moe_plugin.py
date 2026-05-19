@@ -201,7 +201,7 @@ onnx.defs.register_schema(int4_moe_plugin_schema)
 @symbolic_helper.parse_args("v", "v", "v", "v", "v", "v", "i", "i", "i", "i",
                             "i", "i")
 def symbolic_int4_moe_plugin(
-    g: Any,
+    g: object,
     router_logits: torch._C.Value,
     hidden_states: torch._C.Value,
     fc_gate_up_qweights: torch._C.Value,

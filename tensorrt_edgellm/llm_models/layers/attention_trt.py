@@ -41,7 +41,7 @@ from .layer_utils import EdgeLLMQKNorm, EdgeLLMQKVProj
 
 @symbolic_helper.parse_args("v", "v", "v")
 def symbolic_kv_cache_update(
-    g: Any,
+    g: object,
     cache: torch._C.Value,
     new_kv: torch._C.Value,
     cache_indices: torch._C.Value,
@@ -69,7 +69,7 @@ def kv_cache_update_onnx(
 
 @symbolic_helper.parse_args("v", "v", "v", "v", "b", "f")
 def symbolic_attention(
-    g: Any,
+    g: object,
     query: torch._C.Value,
     key: torch._C.Value,
     value: torch._C.Value,
@@ -111,7 +111,7 @@ def attention_onnx(
 
 @symbolic_helper.parse_args("v", "v", "v", "v")
 def symbolic_rope(
-    g: Any,
+    g: object,
     x: torch._C.Value,
     cos: torch._C.Value,
     sin: torch._C.Value,
