@@ -205,23 +205,60 @@ def _openfly_calib_collate(batch):
     return result
 
 
-def _make_openvla_dummy_pixel_values(batch_size=1):
+def _openfly_real_calib_dataloader(calib_dir: str,
+                                   batch_size=1,
+                                   num_samples=512):
+    """Return a DataLoader built from previously collected eval calibration data.
+
+    Reads ``.pt`` files written by the OpenFly eval hook (base_station.py).
+    Each file contains the already-processed ``input_ids``, ``attention_mask``
+    and ``pixel_values`` tensors, so this loader mirrors exact inference inputs.
+    """
+    files = sorted(Path(calib_dir).glob("calib_*.pt"))[:num_samples]
+    if not files:
+        return None
+    dataset = []
+    for fp in files:
+        item = torch.load(fp, weights_only=True)
+        pv = item["pixel_values"]
+        if pv.dtype != torch.float16:
+            pv = pv.to(torch.float16)
+        dataset.append({
+            "input_ids": item["input_ids"],
+            "attention_mask": item["attention_mask"],
+            "pixel_values": pv,
+        })
+    return DataLoader(dataset,
+                      batch_size=batch_size,
+                      shuffle=False,
+                      collate_fn=_openfly_calib_collate)
+
+
+def _make_openvla_dummy_pixel_values(batch_size=1, seed=0):
     """Return dummy pixel_values with OpenVLA-normalised channel layout.
 
     Shape: ``[batch_size * 3, 6, 224, 224]`` float16.
     The first 3 channels are ImageNet-normalised (DINOv2 backbone),
     the last 3 are [-1, 1]-normalised (SigLIP backbone).
+
+    When *seed* is non-zero a per-sample random noise pattern is used so the
+    vision backbone produces **diverse** embeddings across calibration samples.
     """
     import numpy as _np
-    gray = _np.full((3, 224, 224), 128, dtype=_np.uint8)
-    gray01 = gray.astype(_np.float32) / 255.0  # [0, 1]
-    # DINOv2 backbone (ImageNet stats)
+    rng = _np.random.RandomState(seed)
+    # Mid-gray base with small per-pixel jitter to create diverse textures.
+    # Range stays within [0, 255] uint8 so the subsequent normalisation
+    # produces values in the same ballpark as real outdoor scenes.
+    gray = _np.full((3, 224, 224), 128, dtype=_np.float32)
+    if seed != 0:
+        jitter = rng.randint(-64, 64, (3, 224, 224)).astype(_np.float32)
+        gray = _np.clip(gray + jitter, 0, 255)
+    gray01 = gray / 255.0
     dino = _np.stack([
         (gray01[0] - 0.485) / 0.229,
         (gray01[1] - 0.456) / 0.224,
         (gray01[2] - 0.406) / 0.225,
     ], axis=0)
-    # SigLIP backbone ([-1, 1] stats)
     siglip = _np.stack([
         (gray01[0] - 0.5) / 0.5,
         (gray01[1] - 0.5) / 0.5,
@@ -279,23 +316,23 @@ def _openfly_text_calib_dataloader(tokenizer,
 
     texts = [prompts[i % len(prompts)] for i in range(num_samples)]
 
-    pixel_dummy = _make_openvla_dummy_pixel_values(batch_size=1)
-
     dataset = []
-    for text in texts:
-        # Tokenise each prompt individually WITHOUT padding so the sequence
-        # length matches real inference (no stray PAD tokens polluting
-        # attention).  The collate function will stack across the batch dim
-        # (batch_size=1 for OpenVLA, so no padding is needed at all).
+    for idx, text in enumerate(texts):
         enc = tokenizer(text,
                         return_tensors="pt",
                         padding=False,
                         truncation=True,
                         max_length=max_length)
+        # Each calibration sample gets unique randomised pixel_values so
+        # AWQ sees diverse visual features — otherwise every sample shares
+        # identical dummy frames and the activation statistics collapse to
+        # a single visual-text combination.
+        seed = idx
+        pixel_varied = _make_openvla_dummy_pixel_values(batch_size=1, seed=seed)
         dataset.append({
             "input_ids": enc["input_ids"],
             "attention_mask": enc["attention_mask"],
-            "pixel_values": pixel_dummy,
+            "pixel_values": pixel_varied,
         })
     return DataLoader(dataset,
                       batch_size=batch_size,
@@ -441,12 +478,24 @@ def quantize_and_export(
         batch_size = 16 if quantization in (None, "int4_awq") else 1
         if _is_openvla_checkpoint(model_dir):
             batch_size = 1  # OpenVLA uses 3-frame pixel_values; batch dims must match
-            eval_json = os.path.join(_openfly_project_root(), "configs",
-                                     "eval_test.json")
-            loader = _openfly_text_calib_dataloader(tokenizer,
-                                                    eval_dataset_path=eval_json,
-                                                    batch_size=batch_size,
-                                                    num_samples=num_samples)
+            # Prefer real calibration data collected from AirSim eval when available.
+            calib_dir = os.environ.get("OPENFLY_CALIB_OUTPUT_DIR", "")
+            loader = None
+            if calib_dir:
+                loader = _openfly_real_calib_dataloader(calib_dir,
+                                                        batch_size=batch_size,
+                                                        num_samples=num_samples)
+                if loader is not None:
+                    print(f"[OpenVLA calib] Using real eval data from {calib_dir}")
+            if loader is None:
+                eval_json = os.path.join(_openfly_project_root(), "configs",
+                                         "eval_test.json")
+                loader = _openfly_text_calib_dataloader(tokenizer,
+                                                        eval_dataset_path=eval_json,
+                                                        batch_size=batch_size,
+                                                        num_samples=num_samples)
+                print("[OpenVLA calib] Using dummy pixel_values with eval prompts "
+                      "(set OPENFLY_CALIB_OUTPUT_DIR for real data)")
         else:
             loader = _text_calib_dataloader(tokenizer,
                                             dataset,
