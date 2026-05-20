@@ -82,12 +82,14 @@ def _register_openvla_hf_classes() -> None:
     from extern.hf.configuration_prismatic import OpenFlyConfig
     from extern.hf import modeling_prismatic as _modeling_prismatic
     from extern.hf.modeling_prismatic import OpenVLAForActionPrediction
+    from extern.hf.processing_prismatic import PrismaticProcessor
 
-    from transformers import AutoConfig, AutoModelForImageTextToText
+    from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
 
     _modeling_prismatic.PrismaticPreTrainedModel._supports_sdpa = property(lambda self: False)
     AutoConfig.register("openvla", OpenFlyConfig)
     AutoModelForImageTextToText.register(OpenFlyConfig, OpenVLAForActionPrediction)
+    AutoProcessor.register(OpenFlyConfig, PrismaticProcessor)
 
 
 @contextmanager
@@ -180,33 +182,125 @@ def _text_calib_dataloader(tokenizer,
     return DataLoader(enc["input_ids"], batch_size=batch_size, shuffle=False)
 
 
+def _copy_processor_files(src_dir, dst_dir):
+    """Copy processor sidecar files that AutoProcessor needs to initialise."""
+    import shutil
+    for name in ("preprocessor_config.json", "tokenizer.model",
+                 "special_tokens_map.json", "added_tokens.json",
+                 "generation_config.json", "dataset_statistics.json"):
+        src = os.path.join(src_dir, name)
+        dst = os.path.join(dst_dir, name)
+        if os.path.isfile(src) and not os.path.isfile(dst):
+            shutil.copy2(src, dst)
+
+
+def _openfly_calib_collate(batch):
+    """Collate dict batches, stacking pixel_values as [B*3, 6, 224, 224]."""
+    input_ids = torch.cat([item["input_ids"] for item in batch], dim=0)
+    pixel_values = torch.cat([item["pixel_values"] for item in batch], dim=0)
+    result = {"input_ids": input_ids, "pixel_values": pixel_values}
+    if "attention_mask" in batch[0]:
+        result["attention_mask"] = torch.cat(
+            [item["attention_mask"] for item in batch], dim=0)
+    return result
+
+
+def _make_openvla_dummy_pixel_values(batch_size=1):
+    """Return dummy pixel_values with OpenVLA-normalised channel layout.
+
+    Shape: ``[batch_size * 3, 6, 224, 224]`` float16.
+    The first 3 channels are ImageNet-normalised (DINOv2 backbone),
+    the last 3 are [-1, 1]-normalised (SigLIP backbone).
+    """
+    import numpy as _np
+    gray = _np.full((3, 224, 224), 128, dtype=_np.uint8)
+    gray01 = gray.astype(_np.float32) / 255.0  # [0, 1]
+    # DINOv2 backbone (ImageNet stats)
+    dino = _np.stack([
+        (gray01[0] - 0.485) / 0.229,
+        (gray01[1] - 0.456) / 0.224,
+        (gray01[2] - 0.406) / 0.225,
+    ], axis=0)
+    # SigLIP backbone ([-1, 1] stats)
+    siglip = _np.stack([
+        (gray01[0] - 0.5) / 0.5,
+        (gray01[1] - 0.5) / 0.5,
+        (gray01[2] - 0.5) / 0.5,
+    ], axis=0)
+    chw = _np.concatenate([dino, siglip], axis=0)  # [6, 224, 224]
+    frames = _np.stack([chw] * 3 * batch_size, axis=0).astype(_np.float16)
+    return torch.tensor(frames, dtype=torch.float16)
+
+
 def _openfly_text_calib_dataloader(tokenizer,
+                                   eval_dataset_path=None,
                                    batch_size=1,
                                    num_samples=512,
                                    max_length=512):
-    """Return a local OpenFly-style text calibration loader.
+    """Return a calibration DataLoader built from the OpenFly eval dataset.
 
-    We intentionally avoid any Hugging Face dataset download here. The goal is
-    to quantize the language backbone with representative embodied-navigation
-    prompts while keeping the vision tower untouched.
+    Each batch is a dict with ``input_ids`` and ``pixel_values``.
+    Pixel values are dummy mid-gray frames normalised identically to the
+    OpenVLA PrismaticImageProcessor (dual-backbone ImageNet + [-1,1] format).
+
+    When *eval_dataset_path* points to a JSON file (e.g. ``configs/eval_test.json``),
+    the ``gpt_instruction`` field from each entry is wrapped with the standard
+    OpenFly prompt template (``"What action should the robot take to ..."``).
+    If the file cannot be read, the function falls back to a small set of
+    built-in embodied-navigation prompts.
     """
-    prompts = [
-        "You are an embodied UAV policy. Output only the action.",
-        "What action should the UAV take to move toward the destination?",
-        "Move straight ahead and then turn slightly left.",
-        "Proceed forward, then adjust right toward the target building.",
-        "Keep moving in the current direction and stop when close to the goal.",
-        "You are controlling a drone in an outdoor navigation task.",
-        "Interpret the scene and output the next discrete flight action.",
-        "Go forward carefully and avoid deviating too much from the path.",
-    ]
+    # --- collect prompt texts ---
+    prompts = []
+    if eval_dataset_path is not None:
+        try:
+            with open(eval_dataset_path, "r", encoding="utf-8") as fh:
+                eval_entries = json.load(fh)
+            for item in eval_entries[:num_samples]:
+                instruction = item.get("gpt_instruction", "")
+                if instruction:
+                    txt = f"What action should the robot take to {instruction.lower().strip()}?"
+                    prompts.append(txt)
+        except Exception:
+            pass
+
+    if not prompts:
+        prompts = [
+            "What action should the robot take to move toward the destination?",
+            "What action should the robot take to go to the red building?",
+            "What action should the robot take to fly forward and then turn left slightly?",
+            "What action should the robot take to navigate around the obstacle?",
+            "What action should the robot take to approach the landing site?",
+            "What action should the robot take to follow the road and then turn right?",
+            "What action should the robot take to avoid the tall building?",
+            "What action should the robot take to descend slightly and move forward?",
+            "What action should the robot take to stay on the current path?",
+            "What action should the robot take to turn toward the bridge?",
+        ]
+
     texts = [prompts[i % len(prompts)] for i in range(num_samples)]
-    enc = tokenizer(texts,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=max_length)
-    return DataLoader(enc["input_ids"], batch_size=batch_size, shuffle=False)
+
+    pixel_dummy = _make_openvla_dummy_pixel_values(batch_size=1)
+
+    dataset = []
+    for text in texts:
+        # Tokenise each prompt individually WITHOUT padding so the sequence
+        # length matches real inference (no stray PAD tokens polluting
+        # attention).  The collate function will stack across the batch dim
+        # (batch_size=1 for OpenVLA, so no padding is needed at all).
+        enc = tokenizer(text,
+                        return_tensors="pt",
+                        padding=False,
+                        truncation=True,
+                        max_length=max_length)
+        dataset.append({
+            "input_ids": enc["input_ids"],
+            "attention_mask": enc["attention_mask"],
+            "pixel_values": pixel_dummy,
+        })
+    return DataLoader(dataset,
+                      batch_size=batch_size,
+                      shuffle=False,
+                      collate_fn=_openfly_calib_collate)
 
 
 def _load_model(model_dir, dtype="fp16", device="cuda"):
@@ -255,7 +349,12 @@ def _load_model(model_dir, dtype="fp16", device="cuda"):
 def _calibrate(model, dataloader):
     """Forward-loop calibration pass."""
     for data in tqdm(dataloader, desc="Calibrating"):
-        model(data.to(model.device))
+        if isinstance(data, dict):
+            data = {k: v.to(model.device) if isinstance(v, torch.Tensor) else v
+                    for k, v in data.items()}
+            model(**data)
+        else:
+            model(data.to(model.device))
 
 
 def _is_hybrid_model(model):
@@ -341,7 +440,11 @@ def quantize_and_export(
                                        kv_cache_quantization)
         batch_size = 16 if quantization in (None, "int4_awq") else 1
         if _is_openvla_checkpoint(model_dir):
+            batch_size = 1  # OpenVLA uses 3-frame pixel_values; batch dims must match
+            eval_json = os.path.join(_openfly_project_root(), "configs",
+                                     "eval_test.json")
             loader = _openfly_text_calib_dataloader(tokenizer,
+                                                    eval_dataset_path=eval_json,
                                                     batch_size=batch_size,
                                                     num_samples=num_samples)
         else:
@@ -362,6 +465,7 @@ def quantize_and_export(
     tokenizer.save_pretrained(output_dir)
     if processor is not None:
         processor.save_pretrained(output_dir)
+    _copy_processor_files(model_dir, output_dir)
 
     print(f"Saved to {output_dir} (total {time.time() - t0:.1f}s)")
     return output_dir
