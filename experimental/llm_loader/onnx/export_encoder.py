@@ -235,13 +235,14 @@ def export_visual_onnx(
     vcfg = _get_visual_config(model_type, config)
 
     # Build the from-scratch model.
-    # Use a package-relative import so this works regardless of whether
-    # experimental/ is on sys.path (importlib.import_module with an absolute
-    # "llm_loader.*" name fails when the package was loaded via sys.path on
-    # the experimental/ directory rather than installed).
-    _pkg_root = __package__.split(".")[0]  # "llm_loader"
-    _rel = "." + _VISUAL_FAMILY_MODULE[family][len(_pkg_root):]
-    mod = importlib.import_module(_rel, package=__package__)
+    # Support both in-repo execution (`experimental.llm_loader.*`) and the
+    # installed/package form (`llm_loader.*`).  The registry stores the
+    # canonical `llm_loader.*` module names, so rewrite the prefix when the
+    # package is nested under `experimental`.
+    module_name = _VISUAL_FAMILY_MODULE[family]
+    if __package__ and __package__.startswith("experimental."):
+        module_name = module_name.replace("llm_loader", "experimental.llm_loader", 1)
+    mod = importlib.import_module(module_name)
     build_fn = getattr(mod, _VISUAL_FAMILY_BUILD_FN[family])
     logger.info("Building %s visual model ...", family)
     visual_model: nn.Module = build_fn(vcfg, weights, dtype)

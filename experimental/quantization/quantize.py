@@ -205,6 +205,26 @@ def _openfly_calib_collate(batch):
     return result
 
 
+def _append_openvla_boundary_token(input_ids: torch.Tensor,
+                                   attention_mask: Optional[torch.Tensor] = None):
+    """Match OpenVLA predict_action() by appending the trailing 29871 token."""
+    if input_ids.numel() == 0:
+        return input_ids, attention_mask
+    if int(input_ids.reshape(-1)[-1].item()) == 29871:
+        return input_ids, attention_mask
+
+    boundary = torch.tensor([[29871]],
+                            dtype=input_ids.dtype,
+                            device=input_ids.device)
+    input_ids = torch.cat([input_ids, boundary], dim=1)
+    if attention_mask is not None:
+        boundary_mask = torch.ones((attention_mask.shape[0], 1),
+                                   dtype=attention_mask.dtype,
+                                   device=attention_mask.device)
+        attention_mask = torch.cat([attention_mask, boundary_mask], dim=1)
+    return input_ids, attention_mask
+
+
 def _openfly_real_calib_dataloader(calib_dir: str,
                                    batch_size=1,
                                    num_samples=512):
@@ -223,9 +243,11 @@ def _openfly_real_calib_dataloader(calib_dir: str,
         pv = item["pixel_values"]
         if pv.dtype != torch.float16:
             pv = pv.to(torch.float16)
+        input_ids, attention_mask = _append_openvla_boundary_token(
+            item["input_ids"], item["attention_mask"])
         dataset.append({
-            "input_ids": item["input_ids"],
-            "attention_mask": item["attention_mask"],
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
             "pixel_values": pv,
         })
     return DataLoader(dataset,
@@ -323,6 +345,8 @@ def _openfly_text_calib_dataloader(tokenizer,
                         padding=False,
                         truncation=True,
                         max_length=max_length)
+        input_ids, attention_mask = _append_openvla_boundary_token(
+            enc["input_ids"], enc["attention_mask"])
         # Each calibration sample gets unique randomised pixel_values so
         # AWQ sees diverse visual features — otherwise every sample shares
         # identical dummy frames and the activation statistics collapse to
@@ -330,8 +354,8 @@ def _openfly_text_calib_dataloader(tokenizer,
         seed = idx
         pixel_varied = _make_openvla_dummy_pixel_values(batch_size=1, seed=seed)
         dataset.append({
-            "input_ids": enc["input_ids"],
-            "attention_mask": enc["attention_mask"],
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
             "pixel_values": pixel_varied,
         })
     return DataLoader(dataset,
