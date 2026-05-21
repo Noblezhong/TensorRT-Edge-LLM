@@ -120,6 +120,22 @@ struct LLMGenerationResponse
     std::vector<std::string> outputTexts;        //!< Generated text strings for each request in the batch
 };
 
+/*!
+ * @brief Per-request timing breakdown for engine-backed inference
+ *
+ * Times are reported in milliseconds and are intended for high-level request
+ * diagnostics rather than fine-grained kernel profiling.
+ */
+struct LLMRequestTiming
+{
+    double multimodalPreprocessMs{0.0}; //!< Input preprocessing, chat template, multimodal runner setup
+    double prefillMs{0.0};              //!< Base-model prefill and setup work
+    double decodeMs{0.0};               //!< Token generation / decode loop
+    double totalMs{0.0};                //!< Total runtime.handleRequest wall time
+    int64_t requestedMaxGenerateLength{0}; //!< Requested max generation length
+    int64_t generatedTokenCount{0};        //!< Generated token count in the response
+};
+
 /*! \brief RoPE (Rotary Position Embedding) type enumeration
  */
 enum class RopeType

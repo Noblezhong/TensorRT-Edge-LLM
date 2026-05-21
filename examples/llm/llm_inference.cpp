@@ -29,6 +29,7 @@
 #include "tokenizer/tokenizer.h"
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -54,6 +55,13 @@ using Json = nlohmann::json;
 
 namespace
 {
+using Clock = std::chrono::steady_clock;
+
+static double elapsedMs(Clock::time_point start, Clock::time_point end)
+{
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
 bool disableCudaGraphCapture()
 {
     char const* env = std::getenv("OPENFLY_DISABLE_CUDA_GRAPH");
@@ -276,6 +284,7 @@ static bool processRequestBatch(rt::LLMInferenceSpecDecodeRuntime& runtime, cuda
     {
         auto& request = batchedRequests[requestIdx];
         rt::LLMGenerationResponse response;
+        rt::LLMRequestTiming requestTiming;
 
         size_t progressInterval = std::max(size_t(1), std::min(batchedRequests.size() / 10, size_t(100)));
         if ((requestIdx + 1) % progressInterval == 0 || requestIdx == 0 || requestIdx == batchedRequests.size() - 1)
@@ -284,7 +293,7 @@ static bool processRequestBatch(rt::LLMInferenceSpecDecodeRuntime& runtime, cuda
                 100.0 * (requestIdx + 1) / batchedRequests.size());
         }
 
-        bool requestStatus = runtime.handleRequest(request, response, stream);
+        bool requestStatus = runtime.handleRequest(request, response, stream, &requestTiming);
         if (requestStatus)
         {
             if (dumpOutput)
@@ -316,6 +325,7 @@ static bool processRequestBatch(rt::LLMInferenceSpecDecodeRuntime& runtime, cuda
             responseJson["request_idx"] = requestIdx;
             responseJson["batch_idx"] = batchIdx;
 
+            auto const responseBuildStart = Clock::now();
             nlohmann::json messagesJson = nlohmann::json::array();
             for (auto const& msg : request.requests[batchIdx].messages)
             {
@@ -359,6 +369,17 @@ static bool processRequestBatch(rt::LLMInferenceSpecDecodeRuntime& runtime, cuda
                     responseJson["openfly_action_id"] = actionResult.actionId;
                 }
             }
+            auto const responseBuildEnd = Clock::now();
+            responseJson["openfly_requested_max_generate_length"] = request.maxGenerateLength;
+            responseJson["openfly_generated_token_count"]
+                = hasOutputIds ? static_cast<int64_t>(response.outputIds[batchIdx].size()) : 0;
+            responseJson["openfly_timing_ms"] = {
+                {"multimodal_preprocess", requestTiming.multimodalPreprocessMs},
+                {"prefill", requestTiming.prefillMs},
+                {"decode", requestTiming.decodeMs},
+                {"total", requestTiming.totalMs},
+                {"response_build", elapsedMs(responseBuildStart, responseBuildEnd)},
+            };
         outputData["responses"].push_back(responseJson);
     }
     }
@@ -911,7 +932,9 @@ static bool serveUnixSocket(
         bool ok = processRequestBatch(
             runtime, stream, requestBatchedRequests, openFlyDecodeConfig, outputData, command.value("dumpOutput", false));
         outputData["ok"] = ok;
+        auto const socketSerializeStart = Clock::now();
         std::string responsePayload = outputData.dump();
+        LOG_INFO("Socket response serialization took %.3f ms", elapsedMs(socketSerializeStart, Clock::now()));
         if (!writeFrame(clientFd, responsePayload))
         {
             LOG_ERROR("Failed to write socket response");
@@ -1087,10 +1110,13 @@ int main(int argc, char* argv[])
                 requestDumpOutput);
             try
             {
+                auto const fileSerializeStart = Clock::now();
                 std::ofstream outputFileStream(requestOutputFile);
                 if (outputFileStream.is_open())
                 {
                     outputFileStream << outputData.dump(4);
+                    LOG_INFO("File response serialization took %.3f ms",
+                        elapsedMs(fileSerializeStart, Clock::now()));
                     outputFileStream.close();
                     LOG_INFO("All responses exported to: %s", requestOutputFile.c_str());
                 }

@@ -34,6 +34,7 @@
 #include "runtime/llmRuntimeUtils.h"
 #include "sampler/sampling.h"
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -48,6 +49,13 @@ namespace trt_edgellm
 {
 namespace
 {
+using Clock = std::chrono::steady_clock;
+
+static double elapsedMs(Clock::time_point start, Clock::time_point end)
+{
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
 std::tuple<std::string, std::string> keySystemPromptWithLoraWeights(
     std::string const& systemPrompt, std::string const& loraWeightsName)
 {
@@ -485,8 +493,14 @@ void LLMInferenceSpecDecodeRuntime::initializeCommon(std::string const& engineDi
 }
 
 bool LLMInferenceSpecDecodeRuntime::handleRequest(
-    LLMGenerationRequest const& request, LLMGenerationResponse& response, cudaStream_t stream)
+    LLMGenerationRequest const& request, LLMGenerationResponse& response, cudaStream_t stream, LLMRequestTiming* timing)
 {
+    auto const requestStart = Clock::now();
+    if (timing != nullptr)
+    {
+        *timing = {};
+        timing->requestedMaxGenerateLength = request.maxGenerateLength;
+    }
     int32_t const activeBatchSize = static_cast<int32_t>(request.requests.size());
     bool const enableSpecDecode = (mDraftEngineRunner != nullptr) && !request.disableSpecDecode;
     std::string const& loraWeightsName = request.loraWeightsName;
@@ -525,6 +539,7 @@ bool LLMInferenceSpecDecodeRuntime::handleRequest(
         activeBatchSize, maxGenerateLength, std::nullopt, rt::OptionalInputTensors{}, loraWeightsName, stream);
     bool const supportsMultimodalInput = (mAudioRunner != nullptr) || (mVisionRunner != nullptr);
 
+    auto const preprocessStart = Clock::now();
     if (supportsMultimodalInput)
     {
         if (!multiModalRuntimePreprocess(request, context, stream))
@@ -544,6 +559,10 @@ bool LLMInferenceSpecDecodeRuntime::handleRequest(
                 return false;
             }
         }
+    }
+    if (timing != nullptr)
+    {
+        timing->multimodalPreprocessMs = elapsedMs(preprocessStart, Clock::now());
     }
 
     // Forward sampling params to context; spec-decode forces greedy.
@@ -565,6 +584,8 @@ bool LLMInferenceSpecDecodeRuntime::handleRequest(
     {
         setProfilingEnabled(false);
     }
+
+    auto const prefillStart = Clock::now();
 
     // Generate system prompt KVCache for each sequence in the batch
     if (request.saveSystemPromptKVCache)
@@ -705,6 +726,13 @@ bool LLMInferenceSpecDecodeRuntime::handleRequest(
         }
     }
 
+    if (timing != nullptr)
+    {
+        timing->prefillMs = elapsedMs(prefillStart, Clock::now());
+    }
+
+    auto const decodeStart = Clock::now();
+
     while (!checkAllFinished())
     {
         // Observe any consumer cancels at the top of the iteration so they land
@@ -777,6 +805,8 @@ bool LLMInferenceSpecDecodeRuntime::handleRequest(
         return false;
     }
 
+    auto const decodeEnd = Clock::now();
+
     // Record metrics - accumulate across all batches (active + evicted)
     int32_t totalReusedTokens = 0;
     int32_t totalComputedTokens = 0;
@@ -836,6 +866,18 @@ bool LLMInferenceSpecDecodeRuntime::handleRequest(
         response.outputIds[originalIdx] = std::vector<int32_t>(
             batchResult.tokenIds.begin() + (totalLength - genLength), batchResult.tokenIds.end());
         response.outputTexts[originalIdx] = mTokenizer->decode(response.outputIds[originalIdx], true);
+    }
+
+    if (timing != nullptr)
+    {
+        timing->decodeMs = elapsedMs(decodeStart, decodeEnd);
+        timing->totalMs = elapsedMs(requestStart, Clock::now());
+        int64_t generatedTokens = 0;
+        for (auto const& output : response.outputIds)
+        {
+            generatedTokens += static_cast<int64_t>(output.size());
+        }
+        timing->generatedTokenCount = generatedTokens;
     }
 
     return true;

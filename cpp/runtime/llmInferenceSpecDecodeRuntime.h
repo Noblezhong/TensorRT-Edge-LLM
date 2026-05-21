@@ -183,10 +183,12 @@ public:
      * @param request Generation request with prompts and parameters
      * @param response Output response with generated tokens and text
      * @param stream CUDA stream
+     * @param timing Optional per-request timing breakdown output
      * @return True on success, false on failure
      * @throws std::runtime_error if an LLM or CUDA operation fails
      */
-    bool handleRequest(LLMGenerationRequest const& request, LLMGenerationResponse& response, cudaStream_t stream);
+    bool handleRequest(LLMGenerationRequest const& request, LLMGenerationResponse& response, cudaStream_t stream,
+        LLMRequestTiming* timing = nullptr);
 
     /*!
      * @brief Generate and save system prompt KV cache (public API matching standard runtime signature)
